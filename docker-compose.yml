@@ -1,0 +1,61 @@
+# Vécu - serveur self-hosted, prêt à lancer.
+#
+#   1. cp env.exemple .env   puis y mettre un identifiant et un mot de passe
+#   2. docker compose up -d
+#   3. ouvrir http://localhost:8080 et se connecter avec ces identifiants
+#
+# Pas de clé « version » en tête : elle est obsolète dans la spécification
+# Compose actuelle, et Compose émet un avertissement quand elle est présente.
+# Source: https://docs.docker.com/reference/compose-file/services/
+
+services:
+  vecu:
+    build: .
+    restart: unless-stopped
+
+    environment:
+      # Le PREMIER administrateur, créé au démarrage et seulement si la base est
+      # vide. C'est ce qui évite d'avoir à écrire dans la base à la main pour
+      # ouvrir le premier compte. Une fois le compte créé, ces deux variables ne
+      # servent plus à rien et peuvent être retirées.
+      # Les deux vont ensemble, et le mot de passe fait 8 caractères minimum :
+      # le serveur refuse de démarrer autrement (server/main.go).
+      VECU_ADMIN_USER: ${VECU_ADMIN_USER:?définir VECU_ADMIN_USER dans .env}
+      VECU_ADMIN_PASSWORD: ${VECU_ADMIN_PASSWORD:?définir VECU_ADMIN_PASSWORD dans .env}
+
+    volumes:
+      # TOUT l'état du serveur vit ici : la base SQLite et le dépôt git qui
+      # porte les fichiers et leur historique. Perdre ce volume, c'est perdre le
+      # contenu. C'est le seul chose à sauvegarder.
+      - vecu-data:/data
+
+    ports:
+      # HTTP EN CLAIR, et c'est délibéré. Vécu ne termine pas TLS lui-même.
+      #
+      # Le jeton d'appareil et le mot de passe passent dans cette connexion :
+      # exposer ce port directement sur une adresse publique les met en clair
+      # sur le réseau. Deux déploiements sains, et un seul mauvais :
+      #
+      #   - machine locale ou réseau de confiance : tel quel, ça convient ;
+      #   - accessible depuis Internet : mettre un proxy inverse devant, qui
+      #     termine TLS et parle à ce port. Caddy et Traefik obtiennent un
+      #     certificat Let's Encrypt tout seuls ; nginx demande certbot ;
+      #   - accessible depuis Internet SANS proxy : à ne pas faire.
+      #
+      # Le « 127.0.0.1: » ci-dessous est la position par défaut : le port n'est
+      # joignable que depuis la machine hôte. Un proxy inverse tournant sur cette
+      # même machine y accède ; le reste du monde non. Le retirer ouvre le port
+      # sur toutes les interfaces, ce qui est exactement le mauvais déploiement
+      # ci-dessus, donc ne le retirer qu'en connaissance de cause.
+      - "127.0.0.1:8080:8080"
+
+    healthcheck:
+      # busybox wget, présent dans l'image alpine. /health ne demande aucun jeton.
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  vecu-data:

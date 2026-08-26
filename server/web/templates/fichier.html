@@ -1,0 +1,5 @@
+{{define "title"}}{{.Chemin}}{{end}}
+{{define "content"}}
+<p><a href="/admin/">Dossiers</a>{{range .Fil}} / <a href="{{.Href}}">{{.Nom}}</a> {{end}}· <a href="{{.HrefHistorique}}">Historique</a></p>
+<pre class="contenu">{{.Contenu}}</pre>
+{{end}}

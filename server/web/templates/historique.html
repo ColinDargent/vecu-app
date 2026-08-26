@@ -1,0 +1,25 @@
+{{define "title"}}Historique · {{.Chemin}}{{end}}
+{{define "content"}}
+<h1>Historique</h1>
+<p><a href="/admin/">Dossiers</a>{{range .Fil}} / <a href="{{.Href}}">{{.Nom}}</a>{{end}}</p>
+{{if .Erreur}}<p class="erreur">{{.Erreur}}</p>{{end}}
+<table>
+  <tr><th>Date</th><th>Auteur</th><th>Action</th><th></th></tr>
+  {{range .Versions}}
+  <tr>
+    <td>{{.Date}}</td>
+    <td>{{.Auteur}}</td>
+    <td>{{if .Deleted}}suppression{{else}}{{.Message}}{{end}}</td>
+    <td>
+      {{if and (not .Deleted) $.PeutRestaurer}}
+      <form method="post" action="{{$.HrefRestaurer}}">
+        <input type="hidden" name="rev" value="{{.OID}}">
+        <button>Restaurer cette version</button>
+      </form>
+      {{end}}
+    </td>
+  </tr>
+  {{end}}
+</table>
+<p class="discret">Restaurer crée une nouvelle version : rien n'est réécrit, tout reste dans l'historique.</p>
+{{end}}

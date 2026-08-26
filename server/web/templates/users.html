@@ -1,0 +1,28 @@
+{{define "title"}}Utilisateurs{{end}}
+{{define "content"}}
+<h1>Utilisateurs</h1>
+{{if .Erreur}}<p class="erreur">{{.Erreur}}</p>{{end}}
+<table>
+  <tr><th>Nom</th><th>Niveau par défaut</th><th>Rôle</th><th></th></tr>
+  {{range .Users}}
+  <tr>
+    <td>{{.Username}}</td>
+    <td>{{.Niveau}}</td>
+    <td>{{if .IsAdmin}}administrateur{{else}}membre{{end}}</td>
+    <td><a href="/admin/users/{{.ID}}">Gérer les droits</a></td>
+  </tr>
+  {{end}}
+</table>
+
+<h2>Créer un compte</h2>
+<form method="post" action="/admin/users">
+  <p><label>Nom d'utilisateur<br><input name="username" required></label></p>
+  <p><label>Mot de passe<br><input name="password" type="password" autocomplete="new-password" required></label></p>
+  <p><label>Niveau par défaut (racine)<br>
+    <select name="niveau">
+      {{range .Niveaux}}<option value="{{.Valeur}}">{{.Libelle}}</option>{{end}}
+    </select></label></p>
+  <p><label><input type="checkbox" name="admin"> Administrateur</label></p>
+  <p><button>Créer</button></p>
+</form>
+{{end}}

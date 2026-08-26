@@ -1,0 +1,195 @@
+{{define "title"}}{{if .Chemin}}{{.Chemin}}{{else}}Dossiers{{end}}{{end}}
+{{define "content"}}
+<style>
+  .colonnes { display: grid; grid-template-columns: 1fr 19rem; gap: 1.1rem; align-items: start; }
+  @media (max-width: 60rem) { .colonnes { grid-template-columns: 1fr; } }
+  .arbre { border: 1px solid var(--trait); background: var(--creux); box-shadow: var(--enfonce); }
+  .arbre a { display: flex; gap: .5rem; align-items: baseline; padding: .25rem .5rem;
+             color: var(--encre); text-decoration: none; font-family: var(--mono); font-size: 13px; }
+  .arbre a:hover { background: var(--accent); color: var(--accent-encre); }
+  .arbre a:hover .etat { color: inherit; }
+  .arbre .etat { margin-left: auto; font-family: var(--sans); font-size: 11px; color: var(--encre-douce); }
+  .arbre .direct { font-weight: 700; color: var(--alerte); }
+  .arbre a:hover .direct { color: var(--accent-encre); }
+  /* Les panneaux de droite s'empilent DANS la colonne. Sans cette pile, le
+     second devient un troisième élément de la grille `.colonnes` et retombe
+     sous le contenu, en pleine largeur : deux panneaux jumeaux à deux endroits
+     différents de la page. */
+  .pile-panneaux { display: grid; gap: 1.1rem; align-content: start; min-width: 0; }
+  /* Un <select> prend la largeur de sa plus longue option, sans se soucier de
+     la colonne qui le contient. Sans ces deux lignes, un libellé un peu long
+     elargit la colonne de 19rem et fait deborder la PAGE entiere en largeur -
+     mesure a 1295px de scrollWidth pour 1280 de viewport. */
+  .panneau select { max-width: 100%; }
+  .panneau { border: 1px solid var(--trait); background: var(--surface-2); box-shadow: var(--relief); }
+  .panneau .tete { padding: .4rem .6rem; border-bottom: 1px solid var(--trait);
+                   font-size: 11px; text-transform: uppercase; letter-spacing: .09em; font-weight: 700; }
+  .panneau .dedans { padding: .6rem; }
+  .membre { padding: .35rem 0; border-bottom: 1px solid var(--trait-fin); }
+  .membre:last-of-type { border-bottom: 0; }
+  .membre .qui { font-family: var(--mono); font-size: 12.5px; display: block; margin-bottom: .2rem; }
+  .membre .boutons { display: flex; }
+  .membre .boutons form { display: inline; margin: 0; }
+  .membre .boutons button { font-size: 11.5px; padding: .2rem .45rem; }
+  .membre .boutons form:not(:first-child) button { margin-left: -1px; }
+  /* Les règles internes sont REPLIÉES. Déroulées, un groupe de trente skills
+     produisait trente lignes par compte : le panneau poussait les comptes
+     suivants hors de l'écran et noyait les boutons qu'il commente. Le compte
+     tient dans le résumé, qui garde la teinte d'alerte parce qu'il prévient
+     d'un geste sans effet ; le détail attend qu'on le demande. */
+  .membre details.internes { margin-top: .3rem; }
+  .membre details.internes > summary { cursor: pointer; font-size: 11.5px; color: var(--alerte); }
+  .membre .liste-internes {
+    list-style: none; margin: .3rem 0 0; padding: .3rem;
+    max-height: 9rem; overflow: auto;
+    border: 1px solid var(--trait-fin); background: var(--creux);
+  }
+  .membre .liste-internes li { font-size: 11px; line-height: 1.55; }
+  .membre details.internes p { margin: .3rem 0 0; font-size: 11.5px; color: var(--encre-douce); }
+  .fil { font-family: var(--mono); font-size: 12.5px; }
+</style>
+
+<p class="fil"><a href="/admin/">Dossiers</a>{{range .Fil}} / <a href="{{.Href}}">{{.Nom}}</a>{{end}}</p>
+
+<div class="colonnes">
+  <div>
+    <h1>{{if .Chemin}}{{.Chemin}}{{else}}Tous les dossiers{{end}}</h1>
+    <p class="discret">{{len .Entrees}} entrée{{if gt (len .Entrees) 1}}s{{end}} visible{{if gt (len .Entrees) 1}}s{{end}}{{if .Chemin}} · votre accès : {{.Niveau}}{{end}}</p>
+    {{if .Entrees}}
+    <div class="arbre">
+      {{range .Entrees}}
+      <a href="{{.Href}}">
+        <span aria-hidden="true">{{if .Dossier}}▸{{else}}·{{end}}</span>
+        <span>{{.Nom}}{{if .Dossier}}/{{end}}</span>
+        {{/* La surcharge est signalée LÀ OÙ ELLE AGIT. Avant, elle vivait en
+             avertissement rouge sur un autre écran, et rien ne la montrait
+             pendant qu'on naviguait. */}}
+        <span class="etat">{{if .Direct}}<span class="direct">règle directe</span> · {{.Niveau}}{{else}}hérité · {{.Niveau}}{{end}}</span>
+      </a>
+      {{end}}
+    </div>
+    {{else}}
+    <p class="discret">Aucun fichier visible dans votre périmètre.</p>
+    {{end}}
+  </div>
+
+  {{if .Membres}}
+  <div class="pile-panneaux">
+  <aside class="panneau">
+    <div class="tete">Accès à ce dossier</div>
+    <div class="dedans">
+      {{$chemin := .Chemin}}
+      {{range .Membres}}
+      {{$membre := .}}
+      <div class="membre">
+        <span class="qui">{{.Username}}{{if .IsAdmin}} <span class="discret">(admin)</span>{{end}}</span>
+        <span class="boutons">
+          {{range $.Niveaux}}
+          <form method="post" action="/admin/dossiers/acces">
+            <input type="hidden" name="chemin" value="{{$chemin}}">
+            <input type="hidden" name="user_id" value="{{$membre.UserID}}">
+            <input type="hidden" name="niveau" value="{{.Valeur}}">
+            <button{{if eq .Valeur $membre.Niveau}} disabled class="retenu"{{end}}>{{.Libelle}}</button>
+          </form>
+          {{end}}
+        </span>
+        {{if .Profondes}}
+        {{/* <details> est natif : ça se replie sans une ligne de JavaScript. */}}
+        <details class="internes">
+          <summary>{{len .Profondes}} règle{{if gt (len .Profondes) 1}}s{{end}} posée{{if gt (len .Profondes) 1}}s{{end}}
+          plus bas l'emporte{{if gt (len .Profondes) 1}}nt{{end}} sur ces boutons</summary>
+          <ul class="liste-internes">
+            {{range .Profondes}}<li><code>{{.}}</code></li>{{end}}
+          </ul>
+          <p>Tant qu'elles sont là, changer l'accès ici peut ne rien changer. Les retirer sur
+          <a href="/admin/users/{{.UserID}}">la fiche de {{.Username}}</a>.</p>
+        </details>
+        {{end}}
+      </div>
+      {{end}}
+      <p class="discret" style="margin:.7rem 0 0">Le niveau en surbrillance est celui qui
+      s'applique aujourd'hui. Il peut venir du niveau par défaut du compte, sans règle posée
+      ici. La personne à qui vous ouvrez ce dossier le voit se proposer dans son app, et
+      choisit où le poser.</p>
+    </div>
+  </aside>
+
+  {{/* PAS de `{{if .Cohortes}}` autour de ce panneau : sur un dépôt sans
+       cohorte, il disparaîtrait avec le réglage du DÉFAUT qu'il contient, et
+       fermer un dossier deviendrait impossible tant qu'aucun groupe n'existe.
+       C'est le piège trouvé le 21/08 sur la section Groupes, qui vivait dans un
+       `{{if .Skills}}`. La branche est déjà réservée aux administrateurs. */}}
+  <aside class="panneau">
+    <div class="tete">Cohortes et défaut</div>
+    <div class="dedans">
+      {{if .Confirme}}<p class="ok" role="status">Enregistré.</p>{{end}}
+      {{/* UNE SEULE SURFACE AUTORITAIRE. Les cohortes d'un dossier se règlent
+           ici et nulle part ailleurs ; la vue d'un groupe les liste en lecture.
+           Deux écrans qui font tous les deux foi s'écrasent l'un l'autre dès
+           que l'un est resté ouvert pendant que l'autre enregistrait. */}}
+      {{if .Deverrouille}}<p class="ok" role="status">Ce dossier vous serait devenu invisible :
+      une exception a été posée pour VOUS seul, pour que vous puissiez revenir ici. Les autres
+      comptes suivent bien le défaut.</p>{{end}}
+
+      {{/* LE DÉFAUT DU DOSSIER, c'est ce qui FERME. Une cohorte ouvre ; sans ce
+           défaut, protéger un dossier sensible demanderait une règle par compte,
+           à rejouer à chaque embauche. */}}
+      <form method="post" action="/admin/dossiers/defaut" class="form-tags">
+        <input type="hidden" name="chemin" value="{{.Chemin}}">
+        <label>Par défaut, ce dossier est
+          <select name="niveau">
+            {{/* L'option « aucun » n'est pas un confort : sans elle, le premier
+                 niveau de la liste s'affiche comme sélectionné sur un dossier
+                 qui ne porte AUCUN défaut, et l'écran affirme une règle qui
+                 n'existe pas. */}}
+            {{if not .ADefaut}}<option value="" selected>— aucun —</option>{{end}}
+            {{$courant := .Defaut}}
+            {{range .Niveaux}}
+            {{/* `$.ADefaut` dans la condition, pas seulement le niveau : sans
+                 défaut posé, `.Defaut` vaut « invisible » (le zéro de
+                 perms.Level), donc cette option sortait `selected` elle aussi
+                 et gagnait sur « aucun » - la dernière l'emporte en HTML. */}}
+            <option value="{{.Valeur}}"{{if and $.ADefaut (eq .Valeur $courant)}} selected{{end}}>{{.Libelle}}</option>
+            {{end}}
+          </select>
+        </label>
+        <button>Enregistrer</button>
+        {{if .ADefaut}}<button name="retirer" value="1">Retirer le défaut</button>{{end}}
+      </form>
+      <p class="discret">{{if .ADefaut}}Ce dossier porte un défaut : il vaut pour TOUT LE MONDE,
+      y compris pour les comptes qui n'existent pas encore. Une cohorte ou une règle individuelle
+      le rouvre à qui de droit.{{else}}Sans défaut, ce dossier suit le niveau par défaut de chaque
+      compte. Poser un défaut ici le referme pour tous d'un geste, une fois pour toutes.{{end}}</p>
+
+      {{if .Cohortes}}
+      <form method="post" action="/admin/dossiers/cohortes">
+        <input type="hidden" name="chemin" value="{{.Chemin}}">
+        <div class="liste-skills">
+          {{range .Cohortes}}
+          <label class="choix">
+            <input type="checkbox" name="groupe_id" value="{{.ID}}"{{if .Dedans}} checked{{end}}>
+            <span>{{.Nom}}</span>
+          </label>
+          {{end}}
+        </div>
+        <p class="discret">Les membres d'une cohorte cochée reçoivent ce dossier au niveau que
+        la cohorte leur donne. Une cohorte OUVRE : si deux d'entre elles se contredisent, c'est
+        le niveau le plus large qui s'applique, ici comme sur les dossiers du dessous.</p>
+        <button>Enregistrer</button>
+      </form>
+      {{else}}
+      <p class="discret">Aucune cohorte pour l'instant. Elles se créent depuis
+      <a href="/admin/skills#groupes">la page des skills</a>, et servent aussi bien aux dossiers.</p>
+      {{end}}
+    </div>
+  </aside>
+  </div>
+  {{else if .Gestion}}
+  <aside class="panneau">
+    <div class="tete">Accès</div>
+    <div class="dedans"><p class="discret" style="margin:0">L'accès se règle sur un dossier.
+    Le niveau par défaut d'un compte se change sur <a href="/admin/users">sa fiche</a>.</p></div>
+  </aside>
+  {{end}}
+</div>
+{{end}}

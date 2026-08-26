@@ -1,0 +1,111 @@
+{{define "title"}}Droits de {{.Cible.Username}}{{end}}
+{{define "content"}}
+<h1>Droits de {{.Cible.Username}}</h1>
+{{if .Erreur}}<p class="erreur">{{.Erreur}}</p>{{end}}
+
+<h2>Niveau par défaut (racine)</h2>
+<form method="post" action="/admin/users/{{.Cible.ID}}/defaut">
+  <select name="niveau">
+    {{$defaut := .DefautBrut}}
+    {{range .Niveaux}}<option value="{{.Valeur}}" {{if eq .Valeur $defaut}}selected{{end}}>{{.Libelle}}</option>{{end}}
+  </select>
+  <button>Enregistrer</button>
+</form>
+
+<h2>Espaces</h2>
+{{if .Espaces}}
+<table>
+  <tr><th>Espace</th><th>Accès de {{.Cible.Username}}</th></tr>
+  {{range .Espaces}}
+  <tr>
+    <td><code>{{.Nom}}</code></td>
+    <td>
+      {{$acces := .}}
+      {{range $.Niveaux}}
+      <form method="post" action="/admin/dossiers/acces" style="display:inline">
+        <input type="hidden" name="chemin" value="{{$acces.Nom}}">
+        <input type="hidden" name="user_id" value="{{$.Cible.ID}}">
+        <input type="hidden" name="niveau" value="{{.Valeur}}">
+        <input type="hidden" name="retour" value="user">
+        <button{{if eq .Valeur $acces.Niveau}} disabled class="retenu"{{end}}>{{.Libelle}}</button>
+      </form>
+      {{end}}
+      {{if $acces.Profondes}}
+      <div class="erreur">Règles internes qui l'emportent : {{range $acces.Profondes}}<code>{{.}}</code> {{end}}</div>
+      {{end}}
+    </td>
+  </tr>
+  {{end}}
+</table>
+{{else}}<p class="discret">Aucun espace dans le dépôt.</p>{{end}}
+
+<h2>Skills</h2>
+{{if .Skills}}
+<table>
+  <tr><th>Skill</th><th>Accès de {{.Cible.Username}}</th></tr>
+  {{range .Skills}}
+  <tr>
+    <td><code>{{.Slug}}</code></td>
+    <td>
+      {{$acces := .}}
+      {{if $acces.Gere}}
+      {{range $.Niveaux}}
+      <form method="post" action="/admin/skills/acces" style="display:inline">
+        <input type="hidden" name="slug" value="{{$acces.Slug}}">
+        <input type="hidden" name="user_id" value="{{$.Cible.ID}}">
+        <input type="hidden" name="niveau" value="{{.Valeur}}">
+        <input type="hidden" name="retour" value="user">
+        <button{{if eq .Valeur $acces.Niveau}} disabled class="retenu"{{end}}>{{.Libelle}}</button>
+      </form>
+      {{end}}
+      {{else}}
+      {{/* Skill d'un autre : état lisible, gestion réservée à son créateur. */}}
+      <span class="discret">{{$acces.Niveau}} - géré par son créateur</span>
+      {{end}}
+      {{if $acces.Profondes}}
+      <div class="erreur">Règles internes qui l'emportent : {{range $acces.Profondes}}<code>{{.}}</code> {{end}}</div>
+      {{end}}
+    </td>
+  </tr>
+  {{end}}
+</table>
+{{else}}<p class="discret">Aucun skill dans le dépôt.</p>{{end}}
+
+<h2>Règles posées</h2>
+{{if .Regles}}
+<table>
+  <tr><th>Chemin</th><th>Niveau</th><th></th></tr>
+  {{range .Regles}}
+  <tr>
+    <td><code>{{.Path}}</code>{{if .Inconnue}} <span class="discret">(ne correspond à aucun chemin actuel)</span>{{end}}</td>
+    <td>{{.Niveau}}</td>
+    <td><form method="post" action="/admin/users/{{$.Cible.ID}}/droits/supprimer">
+      <input type="hidden" name="chemin" value="{{.Path}}"><button>Retirer</button>
+    </form></td>
+  </tr>
+  {{end}}
+</table>
+{{else}}<p class="discret">Aucune règle : le niveau par défaut s'applique partout.</p>{{end}}
+
+<h2>Ajouter une règle</h2>
+<form method="post" action="/admin/users/{{.Cible.ID}}/droits">
+  <input name="chemin" placeholder="clients/vdf" required>
+  <select name="niveau">
+    {{range .Niveaux}}<option value="{{.Valeur}}">{{.Libelle}}</option>{{end}}
+  </select>
+  <button>Poser la règle</button>
+</form>
+
+<h2>Arborescence (droit effectif)</h2>
+{{if .Arbre}}
+<table>
+  <tr><th>Dossier</th><th>Droit effectif</th></tr>
+  {{range .Arbre}}
+  <tr>
+    <td style="padding-left: {{.Profondeur}}.5rem">{{.Nom}}/{{if .Direct}} <span class="discret">(règle directe)</span>{{end}}</td>
+    <td>{{.Niveau}}</td>
+  </tr>
+  {{end}}
+</table>
+{{else}}<p class="discret">Aucun dossier dans le dépôt (les fichiers à la racine suivent le niveau par défaut).</p>{{end}}
+{{end}}

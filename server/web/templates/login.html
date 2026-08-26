@@ -1,0 +1,10 @@
+{{define "title"}}Connexion{{end}}
+{{define "content"}}
+<h1>Connexion à Vécu</h1>
+{{if .Erreur}}<p class="erreur">{{.Erreur}}</p>{{end}}
+<form method="post" action="/admin/login">
+  <p><label>Nom d'utilisateur<br><input name="username" autocomplete="username" required></label></p>
+  <p><label>Mot de passe<br><input name="password" type="password" autocomplete="current-password" required></label></p>
+  <p><button>Se connecter</button></p>
+</form>
+{{end}}

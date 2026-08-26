@@ -1,0 +1,12 @@
+bin/
+data/
+.env
+.DS_Store
+
+# Sorties de build. Les binaires d'une version passent par les releases GitHub,
+# jamais par l'arbre : c'est ce qui a fait grossir le dépôt d'origine à 202 Mo.
+/dist/
+/appdist/
+
+# Binaire de l'outil de release (passer par `make release`).
+/vecu-release

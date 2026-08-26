@@ -1,0 +1,84 @@
+{{define "title"}}Dossiers{{end}}
+{{define "content"}}
+<style>
+  .grille { display: grid; gap: .9rem; grid-template-columns: repeat(auto-fill, minmax(19rem, 1fr)); }
+  .carte { border: 1px solid var(--trait); background: var(--surface); box-shadow: var(--relief); padding: .8rem .9rem; }
+  .carte .entete { display: flex; align-items: baseline; gap: .5rem; flex-wrap: wrap; }
+  .carte .entete .nom { font-family: var(--mono); font-weight: 700; font-size: 15px; }
+  .carte dl { display: grid; grid-template-columns: auto 1fr; gap: .1rem .6rem; margin: .7rem 0 .6rem; font-size: 12.5px; }
+  .carte dt { color: var(--encre-douce); }
+  .carte dd { margin: 0; }
+  .pastilles { display: flex; gap: .25rem; flex-wrap: wrap; }
+  .pastille { font-family: var(--mono); font-size: 11px; padding: .1rem .35rem; border: 1px solid var(--trait); background: var(--surface-2); }
+  .pastille.rw { background: var(--accent); color: var(--accent-encre); border-color: var(--trait); }
+  .carte .actions { display: flex; gap: .4rem; flex-wrap: wrap; }
+  .bandeau {
+    display: flex; gap: .6rem; align-items: baseline; flex-wrap: wrap;
+    border: 1px solid var(--trait); border-left: 6px solid var(--alerte);
+    background: var(--creux); padding: .6rem .8rem; margin-bottom: 1.1rem; font-size: 13px;
+  }
+  .bandeau b { color: var(--alerte); }
+  .creation { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap; }
+</style>
+
+<h1>Dossiers</h1>
+<p class="discret">Les dossiers auxquels vous avez accès. Donner un accès suffit : le dossier
+apparaît tout seul sur la machine de la personne, sans qu'elle ait rien à taper.</p>
+{{if .Erreur}}<p class="erreur">{{.Erreur}}</p>{{end}}
+
+{{/* Le bandeau ne s'affiche QUE s'il y a quelque chose à arbitrer. Un onglet
+     permanent qui ne dit jamais rien apprend à ne plus être regardé - c'est
+     ce qui est arrivé à l'écran « Conflits », vide depuis que les copies
+     locales ne remontent plus au serveur. */}}
+{{if .Conflits}}
+<div class="bandeau">
+  <b>{{len .Conflits}} copie{{if gt (len .Conflits) 1}}s{{end}} de conflit</b>
+  <span>à comparer et à arbitrer :</span>
+  {{range .Conflits}}<a href="{{.Href}}"><code>{{.Path}}</code></a>{{end}}
+</div>
+{{end}}
+
+{{if .Dossiers}}
+<div class="grille">
+  {{range .Dossiers}}
+  <div class="carte">
+    <div class="entete">
+      <span class="nom">{{.Nom}}</span>
+      {{if .Libelle}}<span class="discret">{{.Libelle}}</span>{{end}}
+    </div>
+    <dl>
+      <dt>Fichiers</dt><dd>{{.Fichiers}}</dd>
+      <dt>Votre accès</dt><dd>{{.Niveau}}</dd>
+      {{if .Membres}}
+      <dt>Membres</dt>
+      <dd class="pastilles">
+        {{range .Membres}}
+        {{/* Un compte invisible sur ce dossier n'est pas un membre : l'afficher
+             ferait lire « qui n'y a pas accès », qui n'est pas la question. */}}
+        {{if ne .Niveau "invisible"}}
+        <span class="pastille{{if eq .Niveau "ecriture"}} rw{{end}}">{{.Username}}{{if eq .Niveau "lecture"}} · lecture{{end}}</span>
+        {{end}}
+        {{end}}
+      </dd>
+      {{end}}
+    </dl>
+    <div class="actions"><a class="btn" href="{{.Href}}">Ouvrir</a></div>
+  </div>
+  {{end}}
+</div>
+{{else}}
+<p class="discret">Aucun dossier visible dans votre périmètre.</p>
+{{end}}
+
+<p style="margin-top:1.1rem"><a href="/admin/export.zip">Exporter en ZIP</a>
+<span class="discret">(votre périmètre ; tout le dépôt pour un administrateur)</span></p>
+
+{{/* Créer un dossier depuis le web le posait à la RACINE Vécu sur le poste de
+     chaque membre, jamais à l'endroit que la personne aurait choisi. La ligne
+     tranchée le 21/08 dit l'inverse : l'app porte le local, le web porte le
+     collectif. Le geste existe donc là où il est juste, dans l'app, et cet
+     écran se contente de dire où. */}}
+<p class="discret" style="margin-top:1.1rem">Pour partager un nouveau dossier, créez-le où vous
+voulez sur votre Mac, puis « Partager un dossier… » dans le menu Vécu. Il reste où il est ; c'est
+ici que vous choisirez ensuite qui y a accès.</p>
+{{end}}

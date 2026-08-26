@@ -1,0 +1,176 @@
+{{define "layout"}}<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{template "title" .}} · Vécu</title>
+<style>
+  /* ------------------------------------------------------------------
+     Peau « système » : un logiciel de bureau, pas un site. Chrome de
+     fenêtre, barre de menu pleine largeur, reliefs biseautés, densité de
+     tableau. Tranché par Colin le 21/08 contre la variante beige :
+     le clin d'oeil rétro est voulu franc.
+
+     TOUT le style tient dans le bloc de variables ci-dessous. Changer de
+     peau ne touche aucun template - c'est ce qui rend le choix réversible.
+
+     Polices SYSTÈME uniquement, et c'est une contrainte du produit : le
+     serveur est un binaire unique qui embarque ses templates, une police
+     distante serait une requête réseau sortante depuis une page servie.
+
+     v1 clair uniquement : fond ET couleur sont fixés ensemble, sinon le
+     dark mode du navigateur rend le texte illisible (fond sombre + texte
+     sombre).
+     ------------------------------------------------------------------ */
+  :root {
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+
+    --bureau: #7E9A98;      /* le fond derrière la fenêtre */
+    --surface: #D6D3CB;     /* le gris de la fenêtre */
+    --surface-2: #C6C3BB;   /* barres et entêtes */
+    --creux: #EDEBE6;       /* fond des zones de saisie et de contenu */
+    --encre: #101010;
+    --encre-douce: #5A574F;
+    --trait: #101010;
+    --trait-fin: #9A968D;
+    --accent: #000082;      /* barre de titre, onglet actif, sélection */
+    --accent-encre: #FFFFFF;
+    --alerte: #A50000;
+    --relief: inset -1px -1px 0 #7D7A72, inset 1px 1px 0 #FFFFFF;
+    --enfonce: inset 1px 1px 0 #7D7A72, inset -1px -1px 0 #FFFFFF;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0; padding: 0;
+    font-family: var(--sans); font-size: 14px; line-height: 1.45;
+    color: var(--encre); background: var(--bureau);
+  }
+
+  /* ---- la fenêtre ------------------------------------------------- */
+  .fenetre {
+    min-height: 100vh; display: flex; flex-direction: column;
+    background: var(--surface); border: 1px solid var(--trait);
+  }
+  @media (min-width: 60rem) {
+    .fenetre { min-height: calc(100vh - 2rem); margin: 1rem; box-shadow: 2px 2px 0 rgba(0,0,0,.45); }
+  }
+
+  .titrebarre {
+    display: flex; align-items: center; gap: .6rem;
+    padding: .35rem .5rem; border-bottom: 1px solid var(--trait);
+    background: var(--accent); color: var(--accent-encre);
+    font-family: var(--mono); font-size: 12px; letter-spacing: .04em;
+  }
+  .titrebarre .marque { font-weight: 700; }
+  .titrebarre .ou { opacity: .75; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* Décoratifs : trois cases de fenêtre qui ne cliquent nulle part. Le
+     produit n'a pas de gestion de fenêtre, elles disent « logiciel ». */
+  .cases { margin-left: auto; display: flex; gap: .25rem; }
+  .cases i { width: 15px; height: 13px; display: block; background: var(--surface); box-shadow: var(--relief); }
+
+  /* ---- barre de menu ---------------------------------------------- */
+  nav {
+    display: flex; align-items: stretch; flex-wrap: wrap;
+    background: var(--surface-2); border-bottom: 1px solid var(--trait);
+  }
+  nav a {
+    padding: .45rem .9rem; color: var(--encre); text-decoration: none; font-weight: 600;
+    border-right: 1px solid var(--trait-fin);
+  }
+  nav a:hover { background: var(--surface); }
+  nav a[aria-current="page"] { background: var(--accent); color: var(--accent-encre); }
+  nav .compte {
+    margin-left: auto; display: flex; align-items: center; gap: .6rem;
+    padding: .25rem .5rem; font-family: var(--mono); font-size: 12px; color: var(--encre-douce);
+  }
+  nav form { margin: 0; display: flex; align-items: center; }
+
+  main { flex: 1; padding: 1.25rem; }
+  @media (min-width: 76rem) { main { padding: 1.5rem 2rem; } }
+
+  /* ---- typographie ------------------------------------------------ */
+  h1 { font-size: 1.25rem; margin: 0 0 .2rem; letter-spacing: -.01em; }
+  h2 {
+    font-size: .78rem; margin: 1.6rem 0 .5rem; text-transform: uppercase;
+    letter-spacing: .1em; color: var(--encre-douce); font-weight: 700;
+  }
+  code, .mono { font-family: var(--mono); }
+  .erreur { color: var(--alerte); }
+  .discret { color: var(--encre-douce); font-size: 12.5px; }
+  p { margin: .3rem 0 .9rem; }
+
+  /* ---- tableaux ---------------------------------------------------- */
+  table { border-collapse: collapse; width: 100%; background: var(--creux); border: 1px solid var(--trait); }
+  th {
+    text-align: left; padding: .35rem .5rem; background: var(--surface-2);
+    border-bottom: 1px solid var(--trait); font-size: 11px;
+    text-transform: uppercase; letter-spacing: .08em; color: var(--encre-douce);
+  }
+  td { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid var(--trait-fin); vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+
+  /* ---- contrôles --------------------------------------------------- */
+  input, select, textarea {
+    font: inherit; font-size: 13px; padding: .3rem .45rem;
+    color: var(--encre); background: var(--creux);
+    border: 1px solid var(--trait); box-shadow: var(--enfonce); border-radius: 0;
+  }
+  button {
+    font: inherit; font-size: 13px; padding: .3rem .8rem; cursor: pointer;
+    color: var(--encre); background: var(--surface);
+    border: 1px solid var(--trait); box-shadow: var(--relief); border-radius: 0;
+  }
+  button:active:not(:disabled) { box-shadow: var(--enfonce); }
+  button:disabled { cursor: default; }
+  /* Un lien qui a l'air d'un bouton. Reste un <a> : imbriquer un <button>
+     dans un <a> n'est pas du HTML valide et casse la navigation au clavier. */
+  a.btn {
+    display: inline-block; font-size: 13px; padding: .3rem .8rem;
+    color: var(--encre); background: var(--surface); text-decoration: none;
+    border: 1px solid var(--trait); box-shadow: var(--relief);
+  }
+  a.btn:active { box-shadow: var(--enfonce); }
+  /* Le bouton retenu d'un groupe de niveaux (« invisible / lecture /
+     écriture »). L'état se lit au CONTRASTE, donc il tient en niveaux de
+     gris et sur une capture désaturée. */
+  button.retenu, button[aria-pressed="true"] {
+    background: var(--accent); color: var(--accent-encre);
+    border-color: var(--trait); box-shadow: var(--enfonce);
+  }
+
+  pre.contenu {
+    white-space: pre-wrap; overflow-x: auto; padding: 1rem;
+    background: var(--creux); border: 1px solid var(--trait); box-shadow: var(--enfonce);
+    font-family: var(--mono); font-size: 13px;
+  }
+</style>
+</head>
+<body>
+<div class="fenetre">
+  <div class="titrebarre">
+    <span class="marque">Vécu</span>
+    <span class="ou">— {{template "title" .}}</span>
+    <span class="cases" aria-hidden="true"><i></i><i></i><i></i></span>
+  </div>
+{{if .User}}
+  {{/* Trois entrées, contre six avant le 21/08. « Accueil » et « Fichiers »
+       montraient le même dépôt, « Espaces » et « Fichiers » le même objet, et
+       « Conflits » était vide en permanence depuis que les copies locales ne
+       remontent plus. Ce qui reste est ce sur quoi on agit. */}}
+  <nav>
+    <a href="/admin/"{{if eq .Page "dossiers"}} aria-current="page"{{end}}>Dossiers</a>
+    <a href="/admin/skills"{{if eq .Page "skills"}} aria-current="page"{{end}}>Skills</a>
+    {{if .User.IsAdmin}}<a href="/admin/users"{{if eq .Page "utilisateurs"}} aria-current="page"{{end}}>Utilisateurs</a>{{end}}
+    <span class="compte">
+      <span>{{.User.Username}}</span>
+      <form method="post" action="/admin/logout"><button>Se déconnecter</button></form>
+    </span>
+  </nav>
+{{end}}
+  <main>{{template "content" .}}</main>
+</div>
+</body>
+</html>{{end}}

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	vecusync "github.com/colindargent/vecu/client/sync"
 )
 
 // TestDeuxJournauxSepares : le moteur et launchd n'écrivent plus dans le même
@@ -34,33 +36,30 @@ func TestDeuxJournauxSepares(t *testing.T) {
 	}
 }
 
-// TestLePlistPointeSurLeJournalApplicatif : le plist est le seul endroit qui
-// décide où vont stdout/stderr. La slice 3 ne le touche pas - c'est tout son
-// intérêt - et ce test le vérifie plutôt que de le supposer.
-func TestLePlistPointeSurLeJournalApplicatif(t *testing.T) {
-	c := serviceCfg{
-		label:   "com.exemple.vecu",
-		binaire: "/Applications/Vécu.app/Contents/MacOS/vecu",
-		racine:  "/Users/x/vault",
-		journal: cheminJournal(),
-	}
-	plist := c.contenuPlist()
-	if !strings.Contains(plist, cheminJournal()) {
-		t.Errorf("le plist ne redirige pas vers le journal applicatif :\n%s", plist)
-	}
-	if strings.Contains(plist, cheminJournalSync()) {
-		t.Errorf("le plist redirige vers le journal du MOTEUR : launchd et la rotation se disputeraient le même fichier\n%s", plist)
-	}
-}
-
 // TestOuvreJournalEcritDansLeJournalDuMoteur : preuve d'exécution, pas de
 // lecture. HOME est déplacé le temps du test pour ne rien écrire dans le vrai
 // ~/Library/Logs.
 func TestOuvreJournalEcritDansLeJournalDuMoteur(t *testing.T) {
 	maison := t.TempDir()
 	t.Setenv("HOME", maison)
+	// os.UserHomeDir lit %USERPROFILE% sur Windows et non HOME : sans cette
+	// ligne, le test lisait le VRAI dossier personnel. Mesuré en CI le 06/09.
+	t.Setenv("USERPROFILE", maison)
+	// Sur Windows, os.UserConfigDir lit %AppData% et non HOME : sans ces deux
+	// lignes, les tests écrivaient dans le VRAI profil de l'utilisateur et se
+	// contaminaient entre eux. Mesuré en CI le 06/09.
+	t.Setenv("AppData", filepath.Join(maison, "AppData", "Roaming"))
+	t.Setenv("LocalAppData", filepath.Join(maison, "AppData", "Local"))
 
 	w := ouvreJournal()
+	// Windows refuse de supprimer un fichier ouvert : sans cette fermeture, le
+	// ménage de t.TempDir() échoue. `ouvreJournal` rend un io.Writer, mais son
+	// implémentation est un journalTournant, qui sait se fermer depuis le port.
+	t.Cleanup(func() {
+		if c, ok := w.(io.Closer); ok {
+			_ = c.Close()
+		}
+	})
 	if w == os.Stderr {
 		t.Fatal("repli sur stderr : le journal n'a pas pu être ouvert")
 	}
@@ -68,7 +67,10 @@ func TestOuvreJournalEcritDansLeJournalDuMoteur(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	attendu := filepath.Join(maison, "Library", "Logs", "vecu-sync.log")
+	// Dérivé de `sync.DossierJournaux` : « ~/Library/Logs » sur macOS,
+	// « %LocalAppData%\Vecu\Logs » sur Windows. La forme macOS est verrouillée
+	// ailleurs, par un test d'égalité littérale.
+	attendu := filepath.Join(vecusync.DossierJournaux(), "vecu-sync.log")
 	b, err := os.ReadFile(attendu)
 	if err != nil {
 		t.Fatalf("rien écrit dans %s : %v", attendu, err)
@@ -94,6 +96,9 @@ func TestRotationAuSeuil(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows refuse de supprimer un fichier ouvert : sans cette fermeture,
+	// le ménage de t.TempDir() échoue sur le journal. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = j.Close() })
 	ligne := strings.Repeat("x", 30) + "\n" // 31 octets
 	for i := 0; i < 40; i++ {
 		if _, err := io.WriteString(j, ligne); err != nil {
@@ -139,6 +144,9 @@ func TestRotationSousEcrituresConcurrentes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows refuse de supprimer un fichier ouvert : sans cette fermeture,
+	// le ménage de t.TempDir() échoue sur le journal. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = j.Close() })
 	const ecrivains, parEcrivain = 8, 60
 	var wg sync.WaitGroup
 	for e := 0; e < ecrivains; e++ {
@@ -272,6 +280,14 @@ func TestFiltreConserveUneLigneTresLongue(t *testing.T) {
 func TestFiltreNeTournePasDeuxFois(t *testing.T) {
 	maison := t.TempDir()
 	t.Setenv("HOME", maison)
+	// os.UserHomeDir lit %USERPROFILE% sur Windows et non HOME : sans cette
+	// ligne, le test lisait le VRAI dossier personnel. Mesuré en CI le 06/09.
+	t.Setenv("USERPROFILE", maison)
+	// Sur Windows, os.UserConfigDir lit %AppData% et non HOME : sans ces deux
+	// lignes, les tests écrivaient dans le VRAI profil de l'utilisateur et se
+	// contaminaient entre eux. Mesuré en CI le 06/09.
+	t.Setenv("AppData", filepath.Join(maison, "AppData", "Roaming"))
+	t.Setenv("LocalAppData", filepath.Join(maison, "AppData", "Local"))
 
 	journal := filepath.Join(maison, "Library", "Logs", "vecu-app.log")
 	if err := os.MkdirAll(filepath.Dir(journal), 0o755); err != nil {

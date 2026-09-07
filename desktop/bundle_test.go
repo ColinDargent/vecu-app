@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -62,6 +63,17 @@ func faitArchive(t *testing.T, entrees []entree) []byte {
 // Rend le chemin de l'exécutable, comme le rendrait os.Executable().
 func bundleInstalle(t *testing.T, parent, version string) string {
 	t.Helper()
+	// Deux choses macOS ici, et aucune ne se transpose : la disposition
+	// « .app/Contents/MacOS » n'existe pas sur Windows, et le faux binaire est un
+	// script « #!/bin/sh ». Sauter dans le fabricant plutôt que dans chaque test.
+	//
+	// Ce n'est pas un trou : sur Windows il N'Y A PAS de bundle, le `.exe` nu est
+	// la livraison (voir cmd/vecu-release, qui n'en construit pas), et le chemin
+	// de mise à jour qui compte là-bas est celui du binaire seul - couvert par
+	// TestLaSondeDeSanteLitUnBinaireSansConsole et par bascule_windows.go.
+	if runtime.GOOS == "windows" {
+		t.Skip("bundle .app : concept macOS ; sur Windows la livraison est le .exe nu")
+	}
 	exe := filepath.Join(parent, "Vécu.app", "Contents", "MacOS", "vecu-app")
 	if err := os.MkdirAll(filepath.Dir(exe), 0o755); err != nil {
 		t.Fatal(err)

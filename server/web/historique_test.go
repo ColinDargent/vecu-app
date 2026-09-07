@@ -102,19 +102,22 @@ func TestExportZipWeb(t *testing.T) {
 		return out
 	}
 
-	// Membre : périmètre seulement (public.md surchargé lisible, secret.md non).
-	fichiers := lire(login(t, h, "achille", "mdp"))
-	if !fichiers["notes/idees.md"] || !fichiers["clients/vdf/public.md"] {
-		t.Errorf("export membre : fichiers du périmètre manquants : %v", fichiers)
-	}
-	if fichiers["clients/vdf/secret.md"] {
-		t.Error("export membre : fichier hors périmètre présent")
+	// UN MEMBRE N'EXPORTE PLUS RIEN (Colin, 01/09). L'export servait deux
+	// publics avec deux règles - le périmètre du lecteur pour un membre, tout le
+	// dépôt pour un admin - et cette double nature faisait lire son exemption
+	// admin comme une fuite. C'est un outil d'administration, il est réservé aux
+	// administrateurs. La porte API `GET /export` n'est pas touchée.
+	if rec := get(h, "/admin/export.zip", login(t, h, "achille", "mdp")); rec.Code != http.StatusForbidden {
+		t.Errorf("export par un membre : attendu 403, obtenu %d", rec.Code)
 	}
 
-	// Admin : tout.
-	fichiers = lire(login(t, h, "colin", "mdp"))
+	// Admin : tout, hors skills des autres comptes.
+	fichiers := lire(login(t, h, "colin", "mdp"))
 	if !fichiers["clients/vdf/secret.md"] {
 		t.Error("export admin : dépôt complet attendu")
+	}
+	if !fichiers["notes/idees.md"] {
+		t.Error("export admin : fichiers ordinaires attendus")
 	}
 }
 

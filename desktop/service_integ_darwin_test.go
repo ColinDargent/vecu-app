@@ -15,18 +15,18 @@ func TestSynchroniseServiceLaunchd(t *testing.T) {
 	}
 	const label = "fr.vecu.test-migration"
 	c := serviceCfg{
-		label:   label,
-		binaire: "/bin/sleep",
-		args:    []string{"3600"}, // reste en vie pour KeepAlive
-		racine:  t.TempDir(),
-		plist:   cheminPlist(label),
-		journal: "/tmp/vecu-test-migration.log",
+		label:      label,
+		binaire:    "/bin/sleep",
+		args:       []string{"3600"}, // reste en vie pour KeepAlive
+		racine:     t.TempDir(),
+		definition: cheminDefinition(label),
+		journal:    "/tmp/vecu-test-migration.log",
 	}
 	// Nettoyage garanti quoi qu'il arrive.
 	t.Cleanup(func() {
 		_ = bootoutService(label)
-		_ = os.Remove(c.plist)
-		_ = os.Remove(c.plist + ".pre-vecu-app.bak")
+		_ = os.Remove(c.definition)
+		_ = os.Remove(c.definition + ".pre-vecu-app.bak")
 	})
 
 	// 1er appel : installe.
@@ -40,7 +40,7 @@ func TestSynchroniseServiceLaunchd(t *testing.T) {
 	if !serviceCharge(label) {
 		t.Fatalf("service non chargé après install")
 	}
-	if _, err := os.Stat(c.plist); err != nil {
+	if _, err := os.Stat(c.definition); err != nil {
 		t.Fatalf("plist absent : %v", err)
 	}
 

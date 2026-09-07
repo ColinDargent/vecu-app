@@ -24,7 +24,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 )
 
 // acquireLocks pose les verrous de ce moteur : celui de la racine, et un par
@@ -33,7 +32,6 @@ import (
 // Tout ou rien. Un moteur qui obtiendrait la racine mais pas l'un de ses espaces
 // synchroniserait quand même le reste, en laissant l'espace contesté à deux
 // processus - le pire des deux mondes, et silencieux.
-// Source: https://pkg.go.dev/golang.org/x/sys/unix#Flock
 func acquireLocks(dir string, montages map[string]string) ([]*os.File, error) {
 	pris := []*os.File{}
 	relache := func() {
@@ -63,6 +61,14 @@ func acquireLocks(dir string, montages map[string]string) ([]*os.File, error) {
 	return pris, nil
 }
 
+// VerrouExclusif : le verrou de fichier du produit, ouvert à l'app de bureau.
+//
+// Exporté pendant le port Windows parce que `desktop` en réécrivait un second à
+// la main (le verrou de migration), avec son propre appel à flock - donc son
+// propre défaut à corriger deux fois. Un seul endroit sait maintenant comment on
+// verrouille un fichier, et c'est celui qui a la couture par système.
+func VerrouExclusif(chemin string) (*os.File, error) { return verrouilleFichier(chemin) }
+
 func verrouilleFichier(chemin string) (*os.File, error) {
 	if err := os.MkdirAll(filepath.Dir(chemin), 0o755); err != nil {
 		return nil, err
@@ -73,8 +79,9 @@ func verrouilleFichier(chemin string) (*os.File, error) {
 	}
 	// Non bloquant : on veut un refus immédiat et lisible, pas un processus qui
 	// attend sans rien dire. Relâché automatiquement à la mort du processus,
-	// donc jamais de verrou orphelin.
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	// donc jamais de verrou orphelin. L'implémentation est par système
+	// (verrou_unix.go / verrou_windows.go) ; la garantie, elle, est la même.
+	if err := poseVerrouExclusif(f); err != nil {
 		f.Close()
 		return nil, err
 	}
@@ -92,13 +99,7 @@ func cheminVerrou(chemin string) string {
 	return filepath.Join(dossierVerrous(), hex.EncodeToString(somme[:16])+".lock")
 }
 
-func dossierVerrous() string {
-	maison, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(os.TempDir(), "vecu-verrous")
-	}
-	return filepath.Join(maison, "Library", "Application Support", "Vecu", "verrous")
-}
+func dossierVerrous() string { return filepath.Join(DossierApplication(), "verrous") }
 
 // sousLaRacine : comparaison LEXICALE, cohérente avec `souLeMontage`. Résoudre
 // les liens ici ferait diverger les deux réponses, et un montage compté deux

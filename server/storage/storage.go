@@ -6,13 +6,17 @@ package storage
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // Store encapsule un repo git bare.
@@ -30,6 +34,14 @@ import (
 type Store struct {
 	dir string // chemin du repo bare (ex: data/brain.git)
 	mu  sync.Mutex
+	// creCache : la carte des créateurs et sa clé d'invalidation. Voir
+	// createurs.go - son verrou est distinct de `mu`, et jamais imbriqué avec.
+	creCache
+	// appelsGit : nombre d'invocations du binaire git depuis l'ouverture du
+	// Store. Sert UNIQUEMENT de garde de test : c'est ce qui fait échouer un
+	// retour au `git log` par fichier, dont le coût (56 s contre 212 ms) ne se
+	// voit dans aucune assertion de résultat.
+	appelsGit atomic.Int64
 }
 
 // Commit décrit une entrée d'historique.
@@ -157,6 +169,21 @@ func (s *Store) commitIndex(author, message string, mutate func(env []string) er
 	if err != nil {
 		return "", err
 	}
+	// ARBRE IDENTIQUE AU PARENT : il n'y a rien à committer, et committer quand
+	// même fabriquerait un commit vide sur `main`.
+	//
+	// La garde existait déjà pour un DELETE sur un chemin absent, mais elle
+	// vivait plus haut et ne couvrait pas toutes les formes de no-op : mesuré,
+	// un DELETE sur un chemin de DOSSIER retirait une entrée d'index qui
+	// n'existe pas, produisait le même arbre, et faisait quand même avancer le
+	// head - donc un appelant qui compare le head avant/après pour savoir si
+	// quelque chose a bougé se faisait mentir. Ici, la garde couvre toutes les
+	// mutations parce qu'elle porte sur le RÉSULTAT.
+	if head != "" {
+		if parent, err := s.git(nil, "rev-parse", head+"^{tree}"); err == nil && parent == tree {
+			return head, nil
+		}
+	}
 	commit, err := s.git(commitEnv(author), "commit-tree", tree, "-p", head, "-m", message)
 	if err != nil {
 		return "", err
@@ -166,6 +193,25 @@ func (s *Store) commitIndex(author, message string, mutate func(env []string) er
 		return "", err
 	}
 	return commit, nil
+}
+
+// BaseHeadCourant : le `baseOID` d'un appelant qui n'a pas de marque-page et
+// veut écrire « comme un pair parfaitement à jour ».
+//
+// Pourquoi ce sentinel plutôt qu'un `Head()` fait par l'appelant. La surface
+// MCP lisait le head, puis appelait `WriteMerge`, qui prend le verrou APRÈS.
+// Rien ne couvrait l'intervalle - et il n'est pas microscopique : `Head()`
+// forke `git rev-parse`, puis le verrou peut attendre derrière une écriture en
+// cours. Mesuré : une base périmée d'un seul commit sur le même chemin produit
+// une copie de conflit. Ici, la base est lue DANS la section critique, donc
+// l'écriture est réellement atomique.
+const BaseHeadCourant = "@head"
+
+func resoutBaseHead(baseOID, head string) string {
+	if baseOID == BaseHeadCourant {
+		return head
+	}
+	return baseOID
 }
 
 // WriteResult décrit l'issue d'une écriture avec base_oid (modèle Dropbox).
@@ -186,7 +232,70 @@ type WriteResult struct {
 //
 // `conflictName` est calculé par l'appelant (il porte l'horodatage et l'auteur)
 // et n'est utilisé qu'en cas de conflit.
+//
+// `baseOID` peut valoir `BaseHeadCourant` : l'ancêtre est alors le head lu SOUS
+// LE VERROU. Voir la constante.
+// WriteMerge écrit `p`, en fusionnant si la base du client est derrière.
+//
+// `empreinteAttendue` est la GARDE D'ÉCHO de DAR-114, et elle est facultative.
+// Voir `echoRompu` juste en dessous pour ce qu'elle ferme.
 func (s *Store) WriteMerge(p, content, author, baseOID, conflictName string) (WriteResult, error) {
+	return s.WriteMergeGardee(p, content, author, baseOID, conflictName, "")
+}
+
+// echoRompu : le contenu que le serveur porte à `p` n'est pas celui que le
+// client croit y remplacer.
+//
+// POURQUOI CETTE GARDE EXISTE (DAR-114, banc du 02/09). Le chemin rapide de
+// cette fonction - `baseOID == head`, donc « le client est à jour, aucune
+// fusion nécessaire » - fait confiance à l'ANCÊTRE DÉCLARÉ par le client, et
+// ne vérifie jamais que le contenu envoyé en descend. Un poste qui déclare une
+// base à jour avec un contenu qui ne l'est pas écrase donc la version de
+// quelqu'un d'autre, DIRECTEMENT : pas de fusion, pas de conflit, pas de copie.
+//
+// C'est le mode d'échec du 10/08, celui que trois semaines d'analyse n'avaient
+// pas expliqué : tout `shared/` revenu à l'état du pair distant, dix-huit
+// cartes perdues, et AUCUNE copie de conflit. Le garde-fou du vault - « rien
+// n'est jamais écrasé silencieusement » - ne pouvait pas jouer, puisque le
+// serveur ne se posait pas la question.
+//
+// Comment un poste arrive dans cet état : avant le marque-page PAR FICHIER
+// (v0.5.0, 19/08), le client déclarait sa tête GLOBALE comme ancêtre de chaque
+// chemin. Un poste dont la tête avait avancé sans que ce chemin-là ne
+// redescende était donc dans cet état par construction - et le 10/08 est
+// antérieur au 19/08. Le marque-page par fichier a fermé cette porte-là ; cette
+// garde ferme la CLASSE, quelle qu'en soit la cause future - état restauré
+// depuis une sauvegarde, `state.json` édité à la main, client d'une version
+// qu'on ne contrôle pas, bug à venir.
+//
+// FACULTATIVE PAR CONSTRUCTION. Une empreinte vide désactive la garde, donc un
+// client qui ne l'envoie pas retrouve exactement le comportement d'avant. C'est
+// ce qui rend le déploiement sûr : les postes en v0.9.1 ne l'envoient pas, ils
+// ne cassent pas. Ils ne sont pas protégés non plus, et c'est la raison pour
+// laquelle cette garde appelle une release.
+func (s *Store) echoRompu(p, empreinteAttendue string) bool {
+	if empreinteAttendue == "" {
+		return false // le client ne dit rien : on ne conclut rien
+	}
+	courant, err := s.Read(p, "")
+	if err != nil {
+		// Le chemin n'existe pas côté serveur. Le client croyait y remplacer
+		// quelque chose : c'est déjà une divergence, mais l'écriture ne détruit
+		// rien. On laisse passer plutôt que de bloquer une création.
+		return false
+	}
+	return hashContenu(courant) != empreinteAttendue
+}
+
+// hashContenu : la MÊME empreinte que le client, sinon la comparaison n'a aucun
+// sens. `client/sync.hashContent` est un sha256 hexadécimal du contenu brut.
+func hashContenu(contenu string) string {
+	somme := sha256.Sum256([]byte(contenu))
+	return hex.EncodeToString(somme[:])
+}
+
+// WriteMergeGardee : `WriteMerge`, plus la garde d'écho.
+func (s *Store) WriteMergeGardee(p, content, author, baseOID, conflictName, empreinteAttendue string) (WriteResult, error) {
 	if err := validatePath(p); err != nil {
 		return WriteResult{}, err
 	}
@@ -200,9 +309,30 @@ func (s *Store) WriteMerge(p, content, author, baseOID, conflictName string) (Wr
 	if err != nil {
 		return WriteResult{}, err
 	}
+	baseOID = resoutBaseHead(baseOID, head)
 
-	// Fast path : le client est à jour, aucune fusion nécessaire.
+	// Fast path : le client est à jour, aucune fusion nécessaire - ET il porte
+	// bien ce que le serveur porte. La seconde moitié est la garde d'écho.
 	if baseOID == head {
+		if s.echoRompu(p, empreinteAttendue) {
+			// LE MODÈLE DROPBOX, ET RIEN D'AUTRE. Le serveur garde sa version,
+			// celle du client atterrit à côté. C'est le même geste que sur un
+			// conflit de fusion, pour la même raison : on ne sait pas laquelle
+			// des deux est la bonne, donc on ne choisit pas - on rend la
+			// divergence VISIBLE au lieu de la trancher en silence.
+			if err := validatePath(conflictName); err != nil {
+				return WriteResult{}, fmt.Errorf("nom de copie de conflit invalide : %w", err)
+			}
+			freeName, err := s.freeConflictPath(conflictName)
+			if err != nil {
+				return WriteResult{}, err
+			}
+			newHead, err := s.writeLocked(freeName, content, author, fmt.Sprintf("update %s", freeName))
+			if err != nil {
+				return WriteResult{}, err
+			}
+			return WriteResult{Head: newHead, Conflict: true, ConflictPath: freeName}, nil
+		}
 		newHead, err := s.writeLocked(p, content, author, fmt.Sprintf("update %s", p))
 		if err != nil {
 			return WriteResult{}, err
@@ -282,6 +412,7 @@ func (s *Store) DeleteMerge(p, author, baseOID, conflictName string) (WriteResul
 	if err != nil {
 		return WriteResult{}, err
 	}
+	baseOID = resoutBaseHead(baseOID, head)
 
 	if baseOID == head {
 		if _, err := s.git(nil, "cat-file", "-e", head+":"+p); err != nil {
@@ -537,6 +668,93 @@ func (s *Store) Read(p, rev string) (string, error) {
 	return out, nil
 }
 
+// ReadBatch lit PLUSIEURS blobs en UN SEUL appel à git.
+//
+// Pourquoi ça existe, et c'est une mesure et pas une intuition : `Read` lance
+// un `git cat-file` par fichier. Mesuré le 31/08 sur un vault de 900 notes,
+// c'est ~10 ms par fichier, donc **9,4 s** pour une recherche qui doit lire
+// tout le périmètre visible - au-delà du délai d'attente de la plupart des
+// clients, donc un outil inutilisable. Le même parcours par `--batch` tient en
+// une fraction de seconde, parce qu'on paie un processus au lieu de neuf cents.
+//
+// Un chemin absent de la révision est simplement absent de la map rendue : ce
+// n'est pas une erreur, un fichier peut disparaître entre le listage et la
+// lecture.
+//
+// Le protocole de `--batch` : une requête par ligne sur stdin, et pour chaque
+// requête connue un en-tête « <oid> <type> <taille> » suivi de <taille> octets
+// puis d'un saut de ligne. Une requête inconnue rend « <requête> missing ».
+// Source: https://git-scm.com/docs/git-cat-file#_batch_output
+func (s *Store) ReadBatch(paths []string, rev string) (map[string]string, error) {
+	if len(paths) == 0 {
+		return map[string]string{}, nil
+	}
+	rev, err := resolveRev(rev)
+	if err != nil {
+		return nil, err
+	}
+	var requetes strings.Builder
+	ordre := make([]string, 0, len(paths))
+	for _, p := range paths {
+		if err := validatePath(p); err != nil {
+			continue // un chemin refusé n'est pas demandé, et n'est pas une erreur de lot
+		}
+		requetes.WriteString(rev + ":" + p + "\n")
+		ordre = append(ordre, p)
+	}
+	if len(ordre) == 0 {
+		return map[string]string{}, nil
+	}
+	brut, err := s.gitRaw(requetes.String(), nil, "cat-file", "--batch")
+	if err != nil {
+		return nil, err
+	}
+
+	out := make(map[string]string, len(ordre))
+	reste := brut
+	for _, p := range ordre {
+		saut := strings.IndexByte(reste, '\n')
+		if saut < 0 {
+			break // sortie tronquée : on rend ce qu'on a pu lire
+		}
+		entete := reste[:saut]
+		reste = reste[saut+1:]
+
+		// LA LIGNE D'ERREUR SE RECONNAÎT SUR LA REQUÊTE, jamais en comptant les
+		// champs. Pour un objet absent, git réécrit la requête suivie de
+		// « missing » - et une requête contient un CHEMIN, qui peut porter des
+		// espaces. `strings.Fields` rendait alors trois champs sur
+		// « main:a/mon fichier.md missing », `Atoi("missing")` échouait, et la
+		// boucle s'arrêtait : tout ce qui suivait alphabétiquement disparaissait
+		// du lot, sans erreur. Mesuré en revue - et atteignable par la simple
+		// course entre le listage et la lecture.
+		requete := rev + ":" + p
+		if strings.HasPrefix(entete, requete+" ") {
+			continue // « missing », « ambiguous » : aucun contenu ne suit
+		}
+
+		// « <oid> <type> <taille> ». Le TYPE est vérifié : `Read` demande
+		// explicitement un blob, et sans ce contrôle un chemin de DOSSIER
+		// rendrait l'objet tree brut, donc les noms de ses enfants. Inatteignable
+		// aujourd'hui (`List -r` ne rend que des blobs), mais c'est une primitive
+		// de fuite d'existence posée dans une API partagée.
+		champs := strings.Fields(entete)
+		if len(champs) != 3 {
+			break // en-tête inattendu : on s'arrête plutôt que de découper au hasard
+		}
+		taille, err := strconv.Atoi(champs[2])
+		if err != nil || taille < 0 || taille > len(reste) {
+			break
+		}
+		if champs[1] == "blob" {
+			out[p] = reste[:taille]
+		}
+		reste = reste[taille:]
+		reste = strings.TrimPrefix(reste, "\n") // le saut de ligne qui suit le contenu
+	}
+	return out, nil
+}
+
 // List renvoie tous les chemins de fichiers à la révision donnée ("" = main).
 func (s *Store) List(rev string) ([]string, error) {
 	rev, err := resolveRev(rev)
@@ -551,6 +769,50 @@ func (s *Store) List(rev string) ([]string, error) {
 		return nil, nil
 	}
 	return strings.Split(strings.TrimSuffix(out, "\x00"), "\x00"), nil
+}
+
+// Empreintes : chemin -> empreinte du blob, à la révision `rev`.
+//
+// C'EST LA PRIMITIVE DE DAR-198, et le choix de l'empreinte plutôt que d'un
+// rang dans l'historique n'est pas une préférence de style. L'historique de
+// production N'EST PAS LINEAIRE - mesuré le 01/09 sur `/data/brain.git` : 8669
+// commits dont 3003 fusions, soit 35 %. Comparer des positions dans un
+// `rev-list` donnerait des réponses fausses sur un tiers de l'historique, et
+// fausses DU BON COTE : « arrivé » là où rien n'est arrivé. L'arbre à une
+// révision, lui, dit ce que cette révision porte vraiment.
+//
+// Le coût est d'une invocation par révision interrogée - donc par poste, jamais
+// par fichier.
+//
+// `ls-tree -r -z` sans `--name-only` rend « <mode> <type> <oid>\t<chemin> »
+// terminé par NUL, ce qui est la seule forme sûre : un chemin peut contenir un
+// espace, et l'échappement des chemins accentués dépend de `core.quotePath`.
+// Source: https://git-scm.com/docs/git-ls-tree
+func (s *Store) Empreintes(rev string) (map[string]string, error) {
+	rev, err := resolveRev(rev)
+	if err != nil {
+		return nil, err
+	}
+	out, err := s.git(nil, "ls-tree", "-r", "-z", rev)
+	if err != nil {
+		return nil, err
+	}
+	empreintes := map[string]string{}
+	if out == "" {
+		return empreintes, nil
+	}
+	for _, ligne := range strings.Split(strings.TrimSuffix(out, "\x00"), "\x00") {
+		tab := strings.IndexByte(ligne, '\t')
+		if tab < 0 {
+			continue
+		}
+		champs := strings.Fields(ligne[:tab])
+		if len(champs) < 3 {
+			continue
+		}
+		empreintes[ligne[tab+1:]] = champs[2]
+	}
+	return empreintes, nil
 }
 
 // Change décrit une modification d'un fichier entre deux révisions.
@@ -814,6 +1076,9 @@ func (s *Store) gitStatus(env []string, args ...string) (stdout string, code int
 
 // gitCmd construit une commande git avec l'environnement durci partagé.
 func (s *Store) gitCmd(stdin string, env []string, args ...string) *exec.Cmd {
+	// Un compteur atomique sur un lancement de process : le coût est nul devant
+	// le fork/exec qui suit. Voir le champ `appelsGit`.
+	s.appelsGit.Add(1)
 	// core.quotePath=off : par défaut git CITE les chemins non-ASCII dans ses
 	// sorties texte (ls-tree, diff, log --name-status) : « notes/idées.md »
 	// devient « "notes/id\303\251es.md" », ce qui casse List/Diff/Log pour

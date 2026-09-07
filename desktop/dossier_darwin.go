@@ -20,12 +20,6 @@ import (
 	"strings"
 )
 
-// errAnnule : la personne a fermé le dialogue. Ce n'est pas une panne, et
-// l'appelant ne doit rien afficher. Une sentinelle plutôt qu'un booléen de
-// retour : le cas nominal (un chemin) et les deux cas d'échec se lisent alors
-// avec le même `if err != nil` que partout ailleurs.
-var errAnnule = errors.New("choix annulé")
-
 // activation : l'app est en barre de menus (pas de Dock, pas de fenêtre), donc
 // rien ne la met au premier plan toute seule et un dialogue pourrait s'ouvrir
 // derrière la fenêtre active.

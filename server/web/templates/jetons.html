@@ -1,0 +1,65 @@
+{{define "title"}}Jetons MCP{{end}}
+{{define "content"}}
+<h1>Jetons MCP</h1>
+
+<p class="discret">Un jeton MCP laisse un agent (Claude Code, une routine) lire et écrire
+le second cerveau en votre nom, sans qu'un poste soit allumé. Il ne peut jamais
+faire plus que ce que vous pouvez faire vous-même, et son plafond peut le
+restreindre davantage.</p>
+
+{{if .Erreur}}<p class="erreur">{{.Erreur}}</p>{{end}}
+
+{{if .Clair}}
+<div class="clair">
+  <h2>Voici le jeton. Il ne sera plus jamais affiché.</h2>
+  <p>Copiez-le maintenant : le serveur n'en garde qu'une empreinte, il ne peut
+  pas vous le remontrer. Si vous le perdez, révoquez-le et créez-en un autre.</p>
+  <pre>{{.Clair}}</pre>
+  <p class="discret">Pour le brancher sur Claude Code, coller le jeton à la place
+  de <code>LE_JETON</code> dans cette commande :</p>
+  <pre>claude mcp add --transport http vecu "https://VOTRE-SERVEUR/mcp" --header "Authorization: Bearer LE_JETON"</pre>
+  <p class="discret">Le jeton n'est pas mis dans la commande ci-dessus à dessein :
+  une commande collée telle quelle se retrouve dans l'historique du terminal, où
+  la révocation ne va pas la chercher.</p>
+</div>
+{{end}}
+
+{{if .Jetons}}
+<table>
+  <tr><th>Nom</th><th>Plafond</th><th>Créé le</th><th>Dernier usage</th><th></th></tr>
+  {{range .Jetons}}
+  <tr{{if .Revoque}} class="revoque"{{end}}>
+    <td>{{.Libelle}}</td>
+    <td>{{.Plafond}}</td>
+    <td><span title="{{.CreeLeExact}}">{{.CreeLe}}</span></td>
+    <td>{{if .DernierUsage}}<span title="{{.DernierUsageExact}}">{{.DernierUsage}}</span>{{else}}<span class="discret">jamais servi</span>{{end}}</td>
+    <td>
+      {{if .Revoque}}révoqué le {{.RevoqueLe}}{{else}}
+      <form method="post" action="/admin/jetons/revoquer">
+        <input type="hidden" name="id" value="{{.ID}}">
+        <button type="submit">Révoquer</button>
+      </form>
+      {{end}}
+    </td>
+  </tr>
+  {{end}}
+</table>
+{{else}}
+<p class="discret">Aucun jeton sur ce compte.</p>
+{{end}}
+
+<h2>Créer un jeton</h2>
+<form method="post" action="/admin/jetons">
+  <p><label>Nom<br><input name="libelle" required placeholder="meeting-processor"></label></p>
+  <p><label>Plafond<br>
+    <select name="plafond">
+      <option value="lecture">lecture seule</option>
+      <option value="ecriture">lecture et écriture</option>
+    </select></label>
+    <span class="discret">Un jeton en lecture seule ne peut rien écrire, même si votre compte le peut.</span>
+  </p>
+  <p><button type="submit">Créer</button>
+    <span class="discret">Chaque envoi crée un jeton de plus. Si vous rechargez
+    cette page après une création, le navigateur vous le demandera.</span></p>
+</form>
+{{end}}

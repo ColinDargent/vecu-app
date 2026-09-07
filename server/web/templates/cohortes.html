@@ -1,0 +1,324 @@
+{{define "title"}}Cohortes{{end}}
+
+{{/* L'ÉCRAN DES COHORTES (DAR-196, 01/09 ; refondu le 04/09).
+     La cohorte est l'objet autour duquel l'administration s'organise : le geste
+     courant à l'arrivée d'un nouveau est de le mettre dans une cohorte, pas de
+     lui poser des dossiers un par un.
+
+     CE QUE LA REFONTE DU 04/09 A ENLEVÉ, et c'est l'essentiel de ce qu'elle a
+     fait. Un même dossier apparaissait QUATRE fois sur cette page : dans
+     l'arbre du panneau, dans une liste de cases à cocher juste en dessous,
+     dans un tableau « niveau par dossier » encore en dessous, puis une
+     quatrième fois dans une section « Réserver un sous-dossier » en bas de
+     page. Quatre vocabulaires pour un seul objet - et les cases n'étaient même
+     pas lues par le serveur : `handleModifierGroupe` ne regarde que `noeud` et
+     `niveau_<chemin>`. Vérifié au navigateur le 04/09 - décocher `clients`,
+     enregistrer, et `clients` était toujours dans la cohorte.
+
+     LA RÈGLE QUI TIENT LA PAGE MAINTENANT : UN CHEMIN, UN SEUL ENDROIT.
+     L'arbre porte ce qu'il couvre (les espaces et leurs enfants directs) ;
+     « Autres chemins » porte le reste, c'est-à-dire ce que la cohorte tient
+     plus profond. Aucun dossier n'apparaît dans les deux. */}}
+
+{{define "content"}}
+<style>
+  /* La colonne du nom porte le panneau : sans largeur minimale elle s'effondre
+     à la largeur du nom pendant que le panneau déplié déborde. Sous 60rem, la
+     borne saute : elle rendait la seule colonne du nom plus large que l'écran,
+     et il fallait faire défiler le tableau pour lire un nom de cohorte. */
+  @media (min-width: 60rem) { td.cohorte { min-width: 23rem; } }
+  td.cohorte > strong { font-size: 14px; }
+  /* Le panneau d'une cohorte : encadré, pour qu'on voie où il commence et où il
+     finit quand il s'ouvre au milieu d'un tableau. */
+  .panneau-cohorte {
+    margin: .4rem 0 .2rem; padding: .55rem .65rem;
+    border: 1px solid var(--trait-fin); background: var(--surface);
+  }
+  .panneau-cohorte h3 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .09em;
+    color: var(--encre-douce); font-weight: 700; margin: .9rem 0 .3rem;
+  }
+  .panneau-cohorte h3:first-child { margin-top: 0; }
+  .panneau-cohorte p { max-width: 40rem; }
+  /* L'arbre et les chemins profonds sont des tableaux de RÉGLAGE, pas de
+     données. Ils perdent donc le fond et le cadre du tableau générique, qui les
+     faisait lire comme un deuxième contenu de page. */
+  table.reglages { width: auto; background: none; border: 0; margin: .2rem 0 .5rem; }
+  table.reglages td { border-bottom: 0; padding: .12rem .5rem .12rem 0; vertical-align: middle; }
+  table.reglages .chemin { font-family: var(--mono); font-size: 12.5px; }
+  table.reglages td.enfant code { color: var(--encre-douce); }
+  /* Le contenu d'une cohorte, en lecture : une ligne par chemin. En ligne
+     continue, un dépôt à quinze dossiers rendait la colonne illisible. */
+  .contenu-cohorte { display: flex; flex-direction: column; gap: .1rem; font-size: 12.5px; }
+  .contenu-cohorte code { font-size: 12px; }
+  td.suppr { width: 1%; white-space: nowrap; }
+</style>
+
+<h1>Cohortes</h1>
+{{/* `renderCohortes` calculait un motif de refus depuis la création de l'écran,
+     et ce gabarit ne l'affichait nulle part : tout refus y était MUET. Le
+     mainteneur recevait un 400 sans un mot, sur un écran qui parle de droits.
+     Trouvé le 02/09 en y branchant la garde de la zone des skills. */}}
+{{if .Erreur}}<p class="erreur" role="alert">{{.Erreur}}</p>{{end}}
+
+{{/* UNE SEULE EXPLICATION, EN HAUT. La page en portait deux, à trois lignes
+     d'intervalle, qui disaient la même chose dans un ordre différent. */}}
+<p class="discret">Une cohorte porte un paquet de dossiers <strong>ou</strong> un paquet de skills,
+jamais les deux, et les comptes qui en héritent. Elle <strong>ouvre</strong> un accès, elle n'en
+ferme aucun : pour réserver un dossier à une cohorte, fermez-le d'abord par son défaut, depuis sa
+page. Une règle posée sur un compte précis l'emporte sur celle de sa cohorte, dans les deux sens.</p>
+
+{{/* CRÉER EST LE PREMIER GESTE, DONC IL EST EN HAUT (04/09). Ce formulaire
+     vivait sous tout le reste : sur un dépôt à dix cohortes, l'atteindre
+     demandait de passer une page entière de panneaux. Et sur un dépôt vide, la
+     page n'était qu'un titre et ce formulaire, tout en bas.
+
+     LE GENRE SE CHOISIT À LA CRÉATION et ne change plus : une cohorte porte des
+     dossiers OU des skills. Le demander ici évite le piège d'une cohorte nommée
+     puis refusée à son premier rangement. */}}
+<h2 id="creer-groupe">Créer une cohorte</h2>
+{{if and .ConfirmeGroupes (not .Groupes)}}<p class="ok" role="status">Enregistré.</p>{{end}}
+<form method="post" action="/admin/cohortes" class="form-tags">
+  <label>Nom <input name="nom" placeholder="Équipe contenu" required maxlength="60" size="22"></label>
+  <label>Elle portera
+    <select name="genre">
+      <option value="dossier">des dossiers</option>
+      <option value="skill">des skills</option>
+    </select></label>
+  <button>Créer</button>
+</form>
+<p class="discret">Elle apparaît aussitôt dans sa section, panneau ouvert, prête à recevoir son
+contenu et ses membres.</p>
+
+{{/* DEUX SECTIONS, UNE PAR GENRE (Colin, 02/09 : « les cohortes de skill et les
+     cohortes de dossier doivent être séparées »). Le typage était en base
+     depuis ce jour-là, mais l'écran rendait toujours UN tableau alphabétique où
+     « Skills contenu » se glissait entre deux cohortes de dossiers. La
+     partition se fait maintenant dans le modèle ; ici, on la parcourt. */}}
+{{range .Sections}}
+{{$section := .}}
+<h2 id="{{.Ancre}}">{{.Titre}}</h2>
+{{if .Groupes}}
+<div class="large">
+<table>
+  <tr><th>Cohorte</th><th>{{.Colonne}}</th><th>Membres</th><th></th></tr>
+  {{range .Groupes}}
+  {{$groupe := .}}
+  <tr>
+    <td class="cohorte">
+      <strong>{{.Nom}}</strong>
+      {{/* Renommer et composer sont la même décision - « cette cohorte, c'est
+           quoi » - donc un seul panneau et un seul « Enregistrer ». */}}
+      <details class="reglage" id="groupe-{{.ID}}"{{if and (eq $.Confirme .ID) (eq $.Ou (printf "groupe-%d" .ID))}} open{{end}}>
+        <summary>Modifier cette cohorte</summary>
+        <div class="panneau-cohorte">
+          {{/* LE GESTE SE DIT, ET PAS SEULEMENT PAR UN PANNEAU RESTÉ OUVERT.
+               « Enregistré. » n'apparaissait que sur un dépôt SANS cohorte,
+               sous le formulaire de création : dès la première cohorte créée,
+               plus aucun enregistrement de la page ne disait quoi que ce soit.
+               Le message vit là où le geste est parti. */}}
+          {{if and (eq $.Confirme .ID) (eq $.Ou (printf "groupe-%d" .ID))}}
+          <p class="ok" role="status">Enregistré.</p>
+          {{end}}
+          <form method="post" action="/admin/cohortes/modifier">
+            <input type="hidden" name="groupe_id" value="{{.ID}}">
+            <h3>Nom</h3>
+            <div class="form-tags">
+              <input name="nom" value="{{.Nom}}" required maxlength="60" size="26"
+                     aria-label="Nom de la cohorte">
+            </div>
+
+            {{if $section.Dossier}}
+            {{/* L'ARBRE, et pas des cases : une case ne sait dire que dedans ou
+                 dehors, or le geste réel est « `clients` oui, mais pas
+                 `clients/confidentiel` ». Chaque ligne porte donc son niveau, et
+                 « privé » y est l'exclusion. */}}
+            <h3>Dossiers portés</h3>
+            <p class="discret">Ce que cette cohorte donne, dossier par dossier. <strong>Privé</strong>
+            sur un sous-dossier l'exclut alors même que son parent est ouvert : c'est le geste « tout
+            le dossier sauf celui-là ». <em>Hors cohorte</em> l'en sort complètement.</p>
+            <table class="reglages">
+              {{range .Arbre}}
+              {{$noeud := .}}
+              <tr>
+                {{/* Le chemin est un LIEN vers la page du dossier : c'est de là
+                     qu'on le ferme par son défaut, et le paragraphe au-dessus
+                     de la page y renvoie sans donner la porte. */}}
+                <td class="chemin{{if .Enfant}} enfant{{end}}">{{if .Enfant}}<span aria-hidden="true">└ </span>{{end}}<a href="/admin/dossiers/{{.Chemin}}"><code>{{.Nom}}</code></a></td>
+                <td>
+                  <input type="hidden" name="noeud" value="{{.Chemin}}">
+                  <select name="niveau_{{.Chemin}}" aria-label="Niveau de {{.Chemin}}">
+                    <option value="hors"{{if not $noeud.Dedans}} selected{{end}}>hors cohorte</option>
+                    <option value=""{{if and $noeud.Dedans (eq $noeud.Niveau "")}} selected{{end}}>niveau du membre</option>
+                    {{range $.Niveaux}}
+                    <option value="{{.Valeur}}"{{if and $noeud.Dedans (eq .Valeur $noeud.Niveau)}} selected{{end}}>{{.Libelle}}</option>
+                    {{end}}
+                  </select>
+                </td>
+              </tr>
+              {{end}}
+            </table>
+            {{else}}
+            <h3>Skills portés</h3>
+            {{if $.Skills}}
+            <p class="discret">Les skills cochés appartiennent à cette cohorte. En décocher un l'en
+            sort et le laisse dans ses autres cohortes : seuls les accès que CELLE-CI lui ouvrait se
+            referment.</p>
+            <div class="liste-skills">
+              {{range $.Skills}}
+              <label class="choix">
+                <input type="checkbox" name="slug" value="{{.Slug}}"
+                       {{if index .DansGroupes $groupe.ID}}checked{{end}}>
+                <code>{{.Slug}}</code>
+              </label>
+              {{end}}
+            </div>
+            {{else}}
+            <p class="discret">Aucun skill à ranger pour l'instant.</p>
+            {{end}}
+            {{end}}
+            <button>Enregistrer</button>
+          </form>
+
+          {{if $section.Dossier}}
+          {{/* CE QUE L'ARBRE NE COUVRE PAS, et rien d'autre. L'arbre s'arrête à
+               deux niveaux (voir `noeudCohorteVM`), donc un chemin plus profond
+               n'y a pas de ligne : il se lit et se règle ici. Un chemin qui EST
+               dans l'arbre n'apparaît pas dans cette liste - c'était tout le
+               problème de la page d'avant, où il apparaissait dans les deux.
+
+               Ces réglages vivent hors du formulaire d'au-dessus, et leurs
+               `<form>` hors du panneau : un `<form>` ne s'imbrique pas, et un
+               retrait ne doit pas partir avec « Enregistrer ». */}}
+          <h3>Autres chemins</h3>
+          {{if .Profonds}}
+          <p class="discret">Ce que la cohorte porte plus profond que l'arbre ci-dessus.</p>
+          <table class="reglages">
+            {{range .Profonds}}
+            {{$chemin := .}}
+            <tr>
+              <td class="chemin"><a href="/admin/dossiers/{{.Chemin}}"><code>{{.Chemin}}</code></a></td>
+              <td>
+                <select form="niv-{{$groupe.ID}}-{{.Chemin}}" name="niveau"
+                        aria-label="Niveau de {{.Chemin}}">
+                  <option value=""{{if not $chemin.Niveau}} selected{{end}}>niveau du membre</option>
+                  {{range $.Niveaux}}
+                  <option value="{{.Valeur}}"{{if eq .Valeur $chemin.Niveau}} selected{{end}}>{{.Libelle}}</option>
+                  {{end}}
+                </select>
+              </td>
+              <td><button form="niv-{{$groupe.ID}}-{{.Chemin}}">Appliquer</button></td>
+              <td><button form="retrait-{{$groupe.ID}}-{{.Chemin}}">Retirer</button></td>
+            </tr>
+            {{end}}
+          </table>
+          {{else}}
+          <p class="discret">Cette cohorte ne porte rien au-delà de ce que l'arbre montre.</p>
+          {{end}}
+          {{/* LE CHAMP QUI MANQUAIT. La page d'avant disait déjà « saisissez-le
+               ici avec invisible » - et n'offrait aucun champ où saisir quoi que
+               ce soit : le formulaire du bas ne portait que des chemins déjà
+               rangés, en dur. Un sous-dossier de troisième niveau n'avait donc
+               AUCUNE porte d'entrée dans une cohorte depuis le web, alors que
+               `handleSetNiveauChemin` sait le ranger depuis le 02/09. */}}
+          <form method="post" action="/admin/cohortes/niveau-chemin" class="form-tags">
+            <input type="hidden" name="groupe_id" value="{{.ID}}">
+            <label>Ajouter <input name="chemin" placeholder="clients/acme/confidentiel"
+                                  size="26" required></label>
+            <label>en
+              <select name="niveau">
+                <option value="">niveau du membre</option>
+                {{range $.Niveaux}}<option value="{{.Valeur}}">{{.Libelle}}</option>{{end}}
+              </select></label>
+            <button>Ajouter</button>
+          </form>
+          <p class="discret">Pour exclure un sous-dossier que son parent ouvre, ajoutez-le
+          en <strong>privé</strong>.</p>
+          {{end}}
+        </div>
+      </details>
+      {{if $section.Dossier}}
+      {{range .Profonds}}
+      <form method="post" action="/admin/cohortes/niveau-chemin" id="niv-{{$groupe.ID}}-{{.Chemin}}">
+        <input type="hidden" name="groupe_id" value="{{$groupe.ID}}">
+        <input type="hidden" name="chemin" value="{{.Chemin}}">
+      </form>
+      <form method="post" action="/admin/cohortes/retirer-chemin" id="retrait-{{$groupe.ID}}-{{.Chemin}}">
+        <input type="hidden" name="groupe_id" value="{{$groupe.ID}}">
+        <input type="hidden" name="chemin" value="{{.Chemin}}">
+      </form>
+      {{end}}
+      {{end}}
+    </td>
+
+    <td>
+      <div class="contenu-cohorte">
+        {{range .Dossiers}}<span><code>{{.Chemin}}</code>{{if .Niveau}} <span class="discret">· {{.Niveau}}</span>{{end}}</span>{{end}}
+        {{range .Skills}}<span><code>{{.}}</code></span>{{end}}
+        {{if and (not .Dossiers) (not .Skills)}}<span class="discret">vide, pour l'instant</span>{{end}}
+      </div>
+    </td>
+
+    {{/* Le même panneau que le partage d'un skill, pour la même raison : une
+         colonne par compte faisait grandir le tableau avec l'équipe. Et le même
+         « Enregistrer », donc le même retour visible - les icônes cliquées une
+         par une écrivaient bien, mais rechargeaient une page de 220 Ko dont
+         cette section est à la fin : on ne voyait jamais le résultat. */}}
+    <td class="partage">
+      {{template "resume" .Resume}}
+      {{/* Le panneau ne se rouvre que si le geste en VENAIT : `Ou` porte
+           l'ancre du formulaire qui a écrit. Sans elle, enregistrer un nom
+           rouvrait aussi la grille des membres, et inversement. */}}
+      <details class="reglage" id="acces-groupe-{{.ID}}"{{if and (eq $.Confirme .ID) (eq $.Ou (printf "acces-groupe-%d" .ID))}} open{{end}}>
+        <summary>Qui est dans cette cohorte</summary>
+        {{if and (eq $.Confirme .ID) (eq $.Ou (printf "acces-groupe-%d" .ID))}}
+        <p class="ok" role="status">Enregistré.</p>
+        {{end}}
+        <form method="post" action="/admin/cohortes/membres">
+          <input type="hidden" name="groupe_id" value="{{.ID}}">
+          <table class="grille-partage">
+            {{range .Membres}}
+            {{$membre := .}}
+            <tr>
+              <th scope="row">{{.Username}}</th>
+              {{range $.Niveaux}}
+              <td><label class="choix">
+                <input type="radio" name="niveau_{{$membre.UserID}}" value="{{.Valeur}}"
+                       {{if eq .Valeur $membre.Niveau}}checked{{end}}>
+                {{template "icone" .Valeur}} <span>{{.Libelle}}</span>
+              </label></td>
+              {{end}}
+            </tr>
+            {{end}}
+          </table>
+          <button>Enregistrer</button>
+        </form>
+      </details>
+    </td>
+
+    {{/* Supprimer referme des accès pour toute une équipe, et le bouton était
+         nu, à un clic, au bout de la ligne. La confirmation est celle que
+         l'écran des dossiers pose déjà sur une suppression du même ordre. */}}
+    <td class="suppr">
+      <form method="post" action="/admin/cohortes/supprimer"
+            onsubmit="return confirm('Supprimer la cohorte « {{.Nom}} » ? Les accès qu\'elle ouvrait se referment.')">
+        <input type="hidden" name="groupe_id" value="{{.ID}}">
+        <button>Supprimer</button>
+      </form>
+    </td>
+  </tr>
+  {{end}}
+</table>
+</div>
+{{if .Dossier}}
+<p class="discret">Supprimer une cohorte referme les accès qu'elle ouvrait, et rien n'est à
+nettoyer ailleurs.</p>
+{{else}}
+<p class="discret">Supprimer une cohorte referme les accès qu'elle ouvrait : les skills qu'elle
+contenait redeviennent privés.</p>
+{{end}}
+{{else}}
+<p class="discret">{{.Vide}}</p>
+{{end}}
+{{end}}
+{{end}}

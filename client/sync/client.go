@@ -230,8 +230,16 @@ func (c *HTTPClient) Read(p string) (contenu, commit string, err error) {
 }
 
 // Put écrit un fichier avec base_oid. Renvoie la réponse (dont Status).
-func (c *HTTPClient) Put(path, content, baseOID string) (WriteResponse, error) {
-	body, _ := json.Marshal(map[string]string{"content": content, "base_oid": baseOID})
+//
+// `empreinteAttendue` est ce que ce poste croit REMPLACER à ce chemin - son
+// `Files[p]`. Le serveur s'en sert comme garde d'écho (DAR-114) : si ce qu'il
+// porte ne correspond pas, il range notre écriture en copie au lieu de
+// l'appliquer. Vide sur une création, ou quand le chemin n'est pas suivi : il
+// n'y a alors rien à protéger.
+func (c *HTTPClient) Put(path, content, baseOID, empreinteAttendue string) (WriteResponse, error) {
+	body, _ := json.Marshal(map[string]string{
+		"content": content, "base_oid": baseOID, "empreinte_attendue": empreinteAttendue,
+	})
 	return c.doWrite("PUT", c.fileURL(path), body)
 }
 

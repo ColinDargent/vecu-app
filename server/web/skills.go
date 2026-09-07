@@ -122,10 +122,19 @@ type skillsData struct {
 	Gestion bool // l'appelant gère au moins un skill : la matrice a une raison d'être
 	Niveaux []niveauVM
 	Erreur  string
-	// Groupes : les groupes de skills, avec leurs membres. Servi aux seuls
+	// Groupes : les cohortes, avec leurs membres. Servi aux seuls
 	// administrateurs - c'est de la gouvernance, comme le panneau d'accès d'un
-	// dossier.
+	// dossier. TOUS genres confondus : les cases de rangement d'un skill n'en
+	// proposent que les cohortes de skills, mais elles doivent aussi pouvoir
+	// rendre celle où le skill est DÉJÀ, quel que soit son genre, parce que
+	// l'ensemble coché fait foi pour `handleRangerSkill`.
 	Groupes []groupeVM
+	// AuMoinsUneCohorteSkill : y a-t-il seulement une cohorte de skills à
+	// proposer. Sans elle, un dépôt qui n'a que des cohortes de dossiers
+	// affichait un cadre « Cohortes » vide, suivi de « aucune case cochée : le
+	// skill redevient privé » - deux phrases qui décrivent un choix qu'on ne
+	// pouvait pas faire.
+	AuMoinsUneCohorteSkill bool
 	// Confirme : le slug du skill dont le partage vient d'être enregistré. Son
 	// panneau s'ouvre et porte le message. Comparé aux skills réellement
 	// affichés : un paramètre qui ne correspond à rien est ignoré, jamais
@@ -295,9 +304,15 @@ func (s *Server) renderSkills(w http.ResponseWriter, r *http.Request, status int
 			erreurHTTP(w, "erreur interne", http.StatusInternalServerError)
 			return
 		}
-		if data.Groupes, err = s.groupesDuDepot(tous); err != nil {
+		if data.Groupes, err = s.groupesDuDepot(u, tous); err != nil {
 			erreurHTTP(w, "erreur interne", http.StatusInternalServerError)
 			return
+		}
+		for _, g := range data.Groupes {
+			if g.Genre == db.GenreSkill {
+				data.AuMoinsUneCohorteSkill = true
+				break
+			}
 		}
 	}
 

@@ -131,6 +131,15 @@ func build(args []string) {
 		m.Assets[cible] = appupdate.Asset{SHA256: appupdate.SumHex(bin), Size: int64(len(bin))}
 		fmt.Printf("✓ %s binaire (%d octets)\n", cible, len(bin))
 
+		// Pas de bundle sur Windows : il n'y a pas de `.app` à emballer, le `.exe`
+		// est la livraison. `desktop/update.go` demande déjà le bundle puis
+		// retombe sur le binaire nu, donc un poste Windows suit ce second chemin
+		// sans rien de spécial à écrire côté client.
+		if goosDe(cible) == "windows" {
+			fmt.Printf("· %s sans bundle (le binaire nu est la livraison)\n", cible)
+			continue
+		}
+
 		arch, err := construitBundle(cible, *version)
 		if err != nil {
 			if *strict {
@@ -152,8 +161,8 @@ func build(args []string) {
 	// Assets peuplé sans Bundles est une release de repli, pas une erreur : les
 	// postes récents attendront la suivante plutôt que d'installer n'importe quoi.
 	// Le dire fort, parce que c'est silencieux autrement.
-	if len(m.Bundles) == 0 {
-		fmt.Fprintln(os.Stderr, "! aucun bundle construit : les postes en v0.9.0+ ne trouveront rien à installer")
+	if len(m.Bundles) == 0 && contientDarwin(m.Assets) {
+		fmt.Fprintln(os.Stderr, "! aucun bundle construit : les postes macOS en v0.9.0+ ne trouveront rien à installer")
 	}
 
 	sm, err := appupdate.Seal(priv, m)
@@ -191,10 +200,21 @@ func compile(cible, version string) ([]byte, error) {
 	defer os.Remove(tmpNom)
 
 	cmd := exec.Command("go", "build",
-		"-ldflags", "-X main.version="+version,
+		"-ldflags", ldflags(goos, version),
 		"-o", tmpNom, "./desktop")
+
+	// CGO PAR CIBLE, et c'est ce qui rend la cible Windows constructible depuis
+	// un Mac. `fyne.io/systray` a besoin de cgo sur macOS (il appelle Cocoa),
+	// mais PAS sur Windows, où il passe par des appels système. Laisser
+	// CGO_ENABLED=1 pour Windows exigerait une chaîne mingw sur la machine de
+	// release ; à 0, un `go build` suffit. Mesuré le 06/09 : l'arbre entier
+	// compile pour windows/amd64 avec CGO_ENABLED=0.
+	cgo := "0"
+	if goos == "darwin" {
+		cgo = "1"
+	}
 	env := append(os.Environ(),
-		"CGO_ENABLED=1",
+		"CGO_ENABLED="+cgo,
 		"GOOS="+goos,
 		"GOARCH="+goarch,
 	)
@@ -248,4 +268,37 @@ func parseVersionRelease(s string) ([3]int, bool) {
 func fatal(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, "erreur : "+format+"\n", a...)
 	os.Exit(1)
+}
+
+// goosDe rend le système d'une cible « os-arch ».
+func goosDe(cible string) string {
+	os, _, _ := strings.Cut(cible, "-")
+	return os
+}
+
+// contientDarwin : l'avertissement « aucun bundle » ne concerne que macOS. Sans
+// ce filtre, une release Windows seule crierait sur un manque qui n'existe pas.
+func contientDarwin(assets map[string]appupdate.Asset) bool {
+	for cible := range assets {
+		if goosDe(cible) == "darwin" {
+			return true
+		}
+	}
+	return false
+}
+
+// ldflags : la version, plus le mode fenêtré sur Windows.
+//
+// `-H windowsgui` empêche Windows d'ouvrir une console noire derrière l'app au
+// lancement. Sans lui, un binaire Go est marqué « application console » et le
+// système lui en attache une - visible, et impossible à fermer sans tuer l'app.
+// C'est l'équivalent du LSUIElement=1 de l'Info.plist sur macOS : dire au
+// système que ce programme n'a pas d'interface en ligne de commande.
+// Source: https://pkg.go.dev/cmd/link
+func ldflags(goos, version string) string {
+	f := "-X main.version=" + version
+	if goos == "windows" {
+		f += " -H windowsgui"
+	}
+	return f
 }

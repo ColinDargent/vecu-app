@@ -11,6 +11,7 @@
 package web
 
 import (
+	"html/template"
 	"log"
 	"net/http"
 	"net/url"
@@ -23,6 +24,8 @@ import (
 	"github.com/colindargent/vecu/server/db"
 	"github.com/colindargent/vecu/server/espaces"
 	"github.com/colindargent/vecu/server/perms"
+	"github.com/colindargent/vecu/server/skills"
+	"github.com/colindargent/vecu/server/storage"
 )
 
 // visibleFiles : la liste des fichiers de main lisibles par l'utilisateur.
@@ -40,6 +43,42 @@ func (s *Server) visibleFiles(u *db.User) ([]string, error) {
 	var out []string
 	for _, f := range all {
 		if perms.CanRead(f, u.DefaultLevel, rules) {
+			out = append(out, f)
+		}
+	}
+	return out, nil
+}
+
+// cheminsAdministrables : la vue d'ADMINISTRATION, celle qui ne se laisse pas
+// filtrer par ce que le lecteur s'est ferme a lui-meme.
+//
+// LE DEFAUT QU'ELLE FERME. Les ecrans se construisaient depuis visibleFiles,
+// donc depuis la vue du LECTEUR : un administrateur qui fermait un dossier ne
+// pouvait plus le rouvrir, l'ecran rendant 404. Mesure du 01/09 : cinq des six
+// portes d'ecriture enferment, seul le defaut de dossier porte un garde.
+//
+// POURQUOI UNE FONCTION DISTINCTE, et pas un booleen sur visibleFiles. Les deux
+// repondent a des questions differentes - « qu'est-ce que je peux lire » contre
+// « qu'est-ce que je peux administrer ». Un booleen se passe a false par
+// distraction et rouvre le trou sans bruit ; deux noms ne se confondent pas.
+//
+// L'EXEMPTION EST EXACTEMENT CELLE DE L'EXPORT ZIP, zone skills exclue
+// comprise : un admin n'administre que les skills qu'on lui a partages, un
+// skill etant prive meme de lui (modele F3). Elle n'elargit donc RIEN qu'un
+// admin n'obtenait deja par `/admin/export.zip` ; elle aligne l'ecran sur ce
+// que la porte d'a cote concede depuis toujours.
+func (s *Server) cheminsAdministrables(u *db.User) ([]string, error) {
+	rules, err := s.DB.Rules(u.ID)
+	if err != nil {
+		return nil, err
+	}
+	all, err := s.Store.List("")
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, f := range all {
+		if (u.IsAdmin && !skills.SousRacine(f)) || perms.CanRead(f, u.DefaultLevel, rules) {
 			out = append(out, f)
 		}
 	}
@@ -93,13 +132,20 @@ type entreeVM struct {
 	// les deux sens : sans ce repère, une règle profonde est invisible.
 	Niveau string
 	Direct bool
+	// Createur : qui a créé cette entrée. Sur un DOSSIER, c'est le créateur de
+	// son fichier le plus ancien - un dossier n'existe que parce qu'un fichier
+	// y vit, donc c'est ce fichier-là qui l'a fait exister. Vide quand la carte
+	// des créateurs ne répond pas (dépôt importé hors du produit, ou historique
+	// illisible) : l'écran se tait plutôt que d'affirmer.
+	Createur string
 }
 
 // children : entrées directes (dossiers puis fichiers) d'un dossier, dérivées
 // de la liste des fichiers visibles. Un dossier n'apparaît que s'il contient
 // au moins un fichier visible : un dossier invisible avec une surcharge
 // lecture sur un fichier précis reste navigable jusqu'à ce fichier.
-func children(visible []string, dir string, defaut perms.Level, rules []perms.Rule) []entreeVM {
+func children(visible []string, dir string, defaut perms.Level, rules []perms.Rule,
+	createurs map[string]storage.Createur) []entreeVM {
 	prefix := ""
 	if dir != "" {
 		prefix = dir + "/"
@@ -108,34 +154,102 @@ func children(visible []string, dir string, defaut perms.Level, rules []perms.Ru
 	for _, ru := range rules {
 		directes[perms.Canon(ru.Path)] = true
 	}
-	seen := map[string]bool{}
-	var dossiers, fichiers []entreeVM
+	// LE CREATEUR D'UN DOSSIER DEMANDE DE VOIR TOUS SES FICHIERS avant de
+	// répondre, là où le reste de l'entrée se décidait à la première
+	// occurrence. D'où les deux temps : on relève d'abord le plus ancien
+	// créateur de chaque dossier, on construit les entrées ensuite.
+	//
+	// CE QUE CETTE DERIVATION DIT EXACTEMENT : « qui a créé le plus ancien
+	// fichier que VOUS voyez ici ». Deux conséquences, assumées, et que la
+	// légende de l'écran énonce plutôt que de laisser croire à un absolu.
+	//
+	//   - Elle dépend du lecteur. Un dossier dont le fichier le plus ancien est
+	//     invisible pour quelqu'un lui nomme le suivant. C'est le prix de la
+	//     frontière « un compte qui ne voit pas un chemin ne voit pas son
+	//     créateur », qui prime : l'alternative serait de dériver le créateur
+	//     d'un dossier sur TOUT son contenu, donc de dire qui a posé le fichier
+	//     caché qu'il abrite.
+	//   - Elle bouge quand on RENOMME. Un chemin recréé est un chemin neuf (voir
+	//     `storage.Createur`), donc renommer le plus ancien fichier d'un dossier
+	//     fait passer le dossier au créateur du suivant. Aucune porte du produit
+	//     ne renomme aujourd'hui ; le jour où l'une le fera, c'est ici que ça se
+	//     verra.
+	ancien := map[string]storage.Createur{}
+	vus := map[string]bool{}
+	var fichiers []entreeVM
 	for _, f := range visible {
 		if !strings.HasPrefix(f, prefix) {
 			continue
 		}
 		rest := f[len(prefix):]
-		if i := strings.IndexByte(rest, '/'); i >= 0 {
-			nom := rest[:i]
-			if seen[nom] {
-				continue
-			}
-			seen[nom] = true
-			chemin := prefix + nom
-			dossiers = append(dossiers, entreeVM{
-				Nom: nom, Href: hrefDossiers(chemin), Dossier: true,
-				Niveau: niveauFR(perms.Effective(chemin, defaut, rules)), Direct: directes[chemin],
-			})
-		} else {
+		i := strings.IndexByte(rest, '/')
+		if i < 0 {
 			fichiers = append(fichiers, entreeVM{
 				Nom: rest, Href: hrefDossiers(f),
 				Niveau: niveauFR(perms.Effective(f, defaut, rules)), Direct: directes[f],
+				Createur: createurs[f].Auteur,
 			})
+			continue
 		}
+		nom := rest[:i]
+		vus[nom] = true
+		c, connu := createurs[f]
+		if !connu {
+			continue
+		}
+		if plusAncien, deja := ancien[nom]; !deja || c.Rang < plusAncien.Rang {
+			ancien[nom] = c
+		}
+	}
+	dossiers := make([]entreeVM, 0, len(vus))
+	for nom := range vus {
+		chemin := prefix + nom
+		dossiers = append(dossiers, entreeVM{
+			Nom: nom, Href: hrefDossiers(chemin), Dossier: true,
+			Niveau: niveauFR(perms.Effective(chemin, defaut, rules)), Direct: directes[chemin],
+			Createur: ancien[nom].Auteur,
+		})
 	}
 	sort.Slice(dossiers, func(i, j int) bool { return dossiers[i].Nom < dossiers[j].Nom })
 	sort.Slice(fichiers, func(i, j int) bool { return fichiers[i].Nom < fichiers[j].Nom })
 	return append(dossiers, fichiers...)
+}
+
+// createursDuPerimetre : les créateurs des chemins que cet écran montre déjà,
+// et d'eux seuls.
+//
+// LE PERIMETRE EST PORTE PAR L'APPEL, pas par un filtre posé après coup : le
+// store ne rend que ce qu'on lui a nommé (voir `CreateursDe`), donc un chemin
+// hors périmètre ne peut pas se retrouver dans une carte qu'on fait circuler.
+// Une fuite demanderait de nommer soi-même le chemin caché, ce qui n'est plus
+// une distraction.
+//
+// Le périmètre passé est celui de l'écran appelant, et c'est voulu : sur un
+// administrateur, `cheminsAdministrables` inclut les dossiers qu'il s'est
+// fermés à lui-même (DAR-196), et le créateur s'y affiche comme le niveau s'y
+// affiche. Un non-administrateur, lui, n'y reçoit que ses chemins lisibles.
+//
+// Une carte illisible n'est PAS une erreur d'écran : on rend une carte vide,
+// les colonnes restent muettes, et la navigation continue de fonctionner. Le
+// créateur est un confort ; l'accès aux fichiers ne l'est pas.
+func (s *Server) createursDuPerimetre(perimetre []string) map[string]storage.Createur {
+	carte, err := s.Store.CreateursDe(perimetre)
+	if err != nil {
+		log.Printf("web: carte des créateurs indisponible : %v", err)
+		return nil
+	}
+	return carte
+}
+
+// auMoinsUnCreateur : une seule entrée qui sait qui l'a créée suffit à
+// justifier la légende de la colonne.
+func auMoinsUnCreateur(entrees []entreeVM) bool {
+	for _, e := range entrees {
+		if e.Createur != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
@@ -178,6 +292,12 @@ type membreVM struct {
 	Username string
 	IsAdmin  bool
 	Niveau   string // forme stockage : compare directement aux valeurs des boutons
+	// Origine : d'OU vient le droit affiche, en clair. Le niveau seul ne dit pas
+	// quoi toucher pour le changer : « lecture » peut venir de la regle du
+	// compte, de sa cohorte, du defaut du dossier ou du defaut du compte, et
+	// chacune se corrige a un endroit different. Sans ca le mainteneur tatonne,
+	// et il tatonne sur des droits.
+	Origine string
 	// Profondes : règles posées À L'INTÉRIEUR du chemin pour ce compte. Sans
 	// cette information le panneau ment - les boutons agissent sur ce dossier,
 	// mais une règle plus profonde l'emporte dans le calcul du droit effectif.
@@ -193,6 +313,11 @@ type dossierVM struct {
 	Fichiers int
 	Niveau   string
 	Membres  []membreVM
+	// Vide : l'espace ne porte que son fichier de métadonnées, il peut être
+	// supprimé. Le refus d'un espace non vide se calcule au RENDU pour que la
+	// porte n'apparaisse que quand elle mène quelque part - proposer un bouton
+	// qui refusera toujours est une promesse qu'on ne tient pas.
+	Vide bool
 }
 
 type accueilData struct {
@@ -207,8 +332,13 @@ type accueilData struct {
 // seuls administrateurs, comme la liste des membres : « qui a accès à quoi »
 // est une information de gouvernance.
 type cohorteChoixVM struct {
-	ID     int64
-	Nom    string
+	ID  int64
+	Nom string
+	// Genre : `dossier` ou `skill`. Sert à la fiche de création d'un compte, qui
+	// propose les deux dans une même liste : sans le genre, « Skills contenu »
+	// et « Équipe delivery » s'y cochent côte à côte sans qu'on sache ce que
+	// l'une et l'autre vont ouvrir.
+	Genre  string
 	Dedans bool
 }
 
@@ -230,9 +360,14 @@ func (s *Server) membresDe(chemin string) ([]membreVM, error) {
 		if err != nil {
 			return nil, err
 		}
+		niveau, origine, err := s.DB.DroitAvecOrigine(&x, chemin)
+		if err != nil {
+			return nil, err
+		}
 		out = append(out, membreVM{
 			UserID: x.ID, Username: x.Username, IsAdmin: x.IsAdmin,
-			Niveau:    perms.Effective(chemin, x.DefaultLevel, rules).String(),
+			Niveau:    niveau.String(),
+			Origine:   origineEnClair(origine),
 			Profondes: reglesInternes(chemin, rules),
 		})
 	}
@@ -270,12 +405,7 @@ func (s *Server) renderAccueil(w http.ResponseWriter, status int, u *db.User, er
 		erreurHTTP(w, "erreur interne", http.StatusInternalServerError)
 		return
 	}
-	fichiers, err := s.Store.List("")
-	if err != nil {
-		erreurHTTP(w, "erreur interne", http.StatusInternalServerError)
-		return
-	}
-	visible, err := s.visibleFiles(u)
+	visible, err := s.cheminsAdministrables(u)
 	if err != nil {
 		erreurHTTP(w, "erreur interne", http.StatusInternalServerError)
 		return
@@ -283,16 +413,32 @@ func (s *Server) renderAccueil(w http.ResponseWriter, status int, u *db.User, er
 
 	data := accueilData{
 		baseData: base(u, "dossiers"), Niveaux: niveauxVM,
-		Conflits: conflitsVisibles(visible), Erreur: erreur,
+		Conflits: conflitsVisibles(lisiblesParmi(visible, u, rules)), Erreur: erreur,
 	}
-	for _, e := range espaces.List(fichiers, u.DefaultLevel, rules) {
+	// Un administrateur voit sur l'accueil TOUS les espaces, y compris ceux
+	// qu'il s'est fermes, annotes de leur niveau reel. Sans ca il ne peut plus
+	// les rouvrir qu'en tapant leur adresse (DAR-196).
+	listeEspaces := espaces.List
+	if u.IsAdmin {
+		listeEspaces = espaces.ListAdmin
+	}
+	// La vue ADMINISTRABLE, pas la liste brute du depot : elle exclut deja les
+	// skills des autres comptes, qui gonfleraient sinon les compteurs de
+	// l'espace `shared` pour un administrateur.
+	for _, e := range listeEspaces(visible, u.DefaultLevel, rules) {
 		vm := dossierVM{
 			Nom: e.Nom, Href: hrefDossiers(e.Nom), Fichiers: e.Fichiers,
 			// Libellé vide = pas de libellé : le template montre alors le nom
 			// technique seul (DT3), au lieu de le répéter deux fois.
-			Niveau: niveauFR(e.Niveau), Libelle: espaces.LitLibelle(s.Store, e.Nom),
+			Niveau: niveauFR(e.Niveau), Libelle: libelleLisible(s.Store, e, u, rules),
 		}
 		if u.IsAdmin {
+			reste, err := espaces.Contenu(s.Store, e.Nom)
+			if err != nil {
+				erreurHTTP(w, "erreur interne", http.StatusInternalServerError)
+				return
+			}
+			vm.Vide = len(reste) == 0
 			membres, err := s.membresDe(e.Nom)
 			if err != nil {
 				erreurHTTP(w, "erreur interne", http.StatusInternalServerError)
@@ -328,6 +474,10 @@ type dossiersData struct {
 	// Cohortes : les groupes, et lesquels portent ce dossier. Même réserve que
 	// Membres - servi aux seuls administrateurs.
 	Cohortes []cohorteChoixVM
+	// AuMoinsUnCreateur : au moins une entrée sait qui l'a créée. La légende
+	// qui explique la colonne ne s'imprime que dans ce cas - sinon la page
+	// promet une colonne absente, et le vide se lit comme une anomalie.
+	AuMoinsUnCreateur bool
 	// Confirme : un geste de cohorte ou de défaut vient d'aboutir.
 	Confirme bool
 	// Defaut : le niveau par défaut porté par CE dossier, et s'il en porte un.
@@ -343,9 +493,43 @@ type dossiersData struct {
 type fichierData struct {
 	baseData
 	Chemin         string
+	Nom            string
 	Fil            []segmentVM
 	HrefHistorique string
 	Contenu        string
+	// Createur : qui a créé ce fichier. Vide si la carte ne répond pas -
+	// l'écran se tait plutôt que d'affirmer.
+	Createur string
+	// Rendu : le markdown mis en forme. Vide quand on montre le source, quand
+	// le fichier n'est pas du markdown, ou quand la note est vide.
+	Rendu template.HTML
+	// Entete : le frontmatter de la note, sorti du markdown mais RENDU quand
+	// même. Voir separeFrontmatter.
+	Entete string
+	// HTMLOmis : la note contient du HTML brut, que goldmark n'affiche pas. La
+	// page le dit : retirer un morceau d'une note en silence, sur l'écran dont
+	// le métier est de la lire, est le pire des deux maux.
+	HTMLOmis bool
+	// Source : on montre les octets, pas la mise en forme. UN CHAMP A LUI, et
+	// pas une déduction sur `Rendu` vide : une note markdown vide rend une
+	// chaîne vide, et la page annoncerait alors « source brut » sur la vue par
+	// défaut, avec un lien de sortie qui pointe sur l'URL courante.
+	Source bool
+	// Markdown : ce fichier SAIT se mettre en forme. Ce qui n'est pas la même
+	// question que « est-ce qu'on le met en forme là, maintenant » (`Source`) :
+	// c'est lui qui décide si la page propose la bascule.
+	Markdown bool
+	// HrefSource, HrefRendu : les deux vues du même fichier. LE SOURCE RESTE
+	// A UN GESTE, et ce n'est pas un détail de confort : quelqu'un qui se
+	// demande ce qu'il y a vraiment dans un fichier - un caractère invisible,
+	// un frontmatter cassé - a besoin des octets, et une mise en forme les lui
+	// cache par construction.
+	HrefSource string
+	HrefRendu  string
+	// Supprimable : ce compte a l'écriture sur ce chemin, et ce n'est pas le
+	// fichier qui fait exister un espace. Calculé au rendu, pour que la porte
+	// n'apparaisse pas là où elle refusera.
+	Supprimable bool
 }
 
 // GET /admin/dossiers[/{path...}] : listing d'un dossier ou contenu d'un
@@ -353,44 +537,84 @@ type fichierData struct {
 // pas l'existence d'un contenu invisible).
 func (s *Server) handleDossiers(w http.ResponseWriter, r *http.Request, u *db.User) {
 	p := perms.Canon(r.PathValue("path"))
-	visible, err := s.visibleFiles(u)
+	visible, err := s.cheminsAdministrables(u)
 	if err != nil {
 		erreurHTTP(w, "erreur interne", http.StatusInternalServerError)
 		return
 	}
-
-	// Fichier exact ?
-	for _, f := range visible {
-		if f == p {
-			contenu, err := s.Store.Read(p, "")
-			if err != nil {
-				erreurHTTP(w, "introuvable", http.StatusNotFound)
-				return
-			}
-			render(w, http.StatusOK, "fichier", fichierData{
-				baseData: base(u, "dossiers"), Chemin: p, Fil: fil(p),
-				HrefHistorique: hrefAdmin("/admin/historique", p), Contenu: contenu,
-			})
-			return
-		}
-	}
-
 	rules, err := s.DB.Rules(u.ID)
 	if err != nil {
 		erreurHTTP(w, "erreur interne", http.StatusInternalServerError)
 		return
 	}
+	// DEUX VUES, et la frontiere entre elles est le coeur de ce handler.
+	// ADMINISTRER un dossier (le voir dans l'arbre, regler ses droits) n'est pas
+	// LIRE un fichier : un administrateur qui s'est ferme un dossier doit
+	// pouvoir le rouvrir sans en lire le contenu au passage.
+	//
+	// La lisibilite se decide sur LE chemin demande, pas en reconstruisant tout
+	// le perimetre du lecteur. Une premiere version rappelait visibleFiles ici :
+	// deux Store.List complets par requete, et l'ecran de navigation passait de
+	// 10 a 21 ms sur le banc de DAR-195, pour un renseignement binaire.
+	for _, f := range visible {
+		if f == p {
+			if !perms.CanRead(p, u.DefaultLevel, rules) {
+				erreurHTTP(w, "introuvable", http.StatusNotFound)
+				return
+			}
+			contenu, err := s.Store.Read(p, "")
+			if err != nil {
+				erreurHTTP(w, "introuvable", http.StatusNotFound)
+				return
+			}
+			rules, err := s.DB.Rules(u.ID)
+			if err != nil {
+				erreurHTTP(w, "erreur interne", http.StatusInternalServerError)
+				return
+			}
+			href := hrefDossiers(p)
+			data := fichierData{
+				baseData: base(u, "dossiers"), Chemin: p, Nom: path.Base(p), Fil: fil(p),
+				HrefHistorique: hrefAdmin("/admin/historique", p), Contenu: contenu,
+				// UN SEUL CHEMIN DEMANDE : cet écran n'a pas affaire au reste du
+				// dépôt, et chaque appel coûte un fork de `git rev-parse` pour
+				// vérifier la clé du cache. On ne le paie pas sur un 404.
+				Createur:   s.createursDuPerimetre([]string{p})[p].Auteur,
+				Markdown:   estMarkdown(p),
+				Source:     !estMarkdown(p) || r.URL.Query().Has("source"),
+				HrefSource: href + "?source",
+				HrefRendu:  href,
+				Supprimable: perms.CanWrite(p, u.DefaultLevel, rules) &&
+					path.Base(p) != espaces.FichierMeta,
+			}
+			if !data.Source {
+				note, err := metEnForme(contenu)
+				if err != nil {
+					// Le repli est le source, qui est toujours juste. Cette
+					// branche ne peut pas se produire aujourd'hui (voir
+					// metEnForme) ; on ne l'ignore pas pour autant.
+					log.Printf("web: rendu markdown de %q : %v", p, err)
+					data.Source = true
+				} else {
+					data.Rendu, data.Entete, data.HTMLOmis = note.Corps, note.Entete, note.HTMLOmis
+				}
+			}
+			render(w, http.StatusOK, "fichier", data)
+			return
+		}
+	}
 
 	// Dossier (la racine existe toujours, même vide) ?
-	entrees := children(visible, p, u.DefaultLevel, rules)
+	entrees := children(visible, p, u.DefaultLevel, rules, s.createursDuPerimetre(visible))
 	if p != "" && len(entrees) == 0 {
 		erreurHTTP(w, "introuvable", http.StatusNotFound)
 		return
 	}
 	data := dossiersData{
 		baseData: base(u, "dossiers"), Chemin: p, Fil: fil(p), Entrees: entrees,
-		Niveau:  niveauFR(perms.Effective(p, u.DefaultLevel, rules)),
-		Gestion: u.IsAdmin, Niveaux: niveauxVM,
+		AuMoinsUnCreateur: auMoinsUnCreateur(entrees),
+		Niveau:            niveauFR(perms.Effective(p, u.DefaultLevel, rules)),
+		Gestion:           u.IsAdmin, Niveaux: niveauxVM,
 		Confirme: u.IsAdmin && r.URL.Query().Has("okc"),
 	}
 	// L'accès se règle sur un DOSSIER, jamais à la racine du dépôt : une règle
@@ -454,6 +678,10 @@ func (s *Server) handleSetAcces(w http.ResponseWriter, r *http.Request, u *db.Us
 		s.renderAccueil(w, http.StatusBadRequest, u, "chemin, utilisateur ou niveau invalide")
 		return
 	}
+	if refus := refusZoneSkills(chemin); refus != "" {
+		s.renderAccueil(w, http.StatusBadRequest, u, refus)
+		return
+	}
 	if _, err := s.DB.UserByID(userID); err != nil {
 		s.renderAccueil(w, http.StatusBadRequest, u, "utilisateur introuvable")
 		return
@@ -470,87 +698,76 @@ func (s *Server) handleSetAcces(w http.ResponseWriter, r *http.Request, u *db.Us
 	http.Redirect(w, r, hrefDossiers(chemin), http.StatusSeeOther)
 }
 
-// POST /admin/dossiers/cohortes : régler l'ensemble des cohortes d'un dossier.
+// POST /admin/fichier/supprimer : la troisième porte de DAR-204.
 //
-// UNE SEULE SURFACE AUTORITAIRE PAR ENSEMBLE. Les cohortes d'un dossier se
-// règlent ICI et nulle part ailleurs ; la vue d'un groupe les liste en lecture,
-// avec un lien vers le dossier. Deux écrans qui prétendent tous les deux « ce
-// que je montre fait foi » se marchent dessus dès que l'un est resté ouvert
-// pendant que l'autre enregistrait, et le second écrase le premier sans rien
-// signaler.
+// `DELETE /files/…` existait côté API et le client sait supprimer ; ce qui
+// manquait était la surface web. Le mainteneur d'un client ne va pas ouvrir un
+// terminal pour retirer un fichier.
 //
-// Réservé aux administrateurs par sa route (« un membre ne fabrique pas de
-// périmètre », 21/08). Le geste du créateur, lui, ne concerne que les skills.
-func (s *Server) handleSetCohortes(w http.ResponseWriter, r *http.Request, u *db.User) {
+// CE N'EST PAS UNE SUPPRESSION LOCALE, ET L'ÉCRAN LE DIT. Le fichier part du
+// dépôt, donc de TOUS les postes au cycle suivant. C'est le geste le plus
+// destructeur de l'interface, et le seul dont l'effet dépasse l'écran où on le
+// déclenche - d'où la confirmation par le nom, comme sur les deux autres portes.
+//
+// LE FICHIER DE MÉTADONNÉES D'UN ESPACE EST REFUSÉ ICI, et ce refus est le
+// point le plus important de ce handler. Le retirer ferait cesser l'espace
+// d'exister sans supprimer son contenu, qui deviendrait ORPHELIN - et c'est
+// précisément le trou que `espaces.Supprimer` a fermé ce matin, en refusant de
+// supprimer un espace non vide. Sans ce refus, cette porte le rouvrirait par
+// derrière : le ticket DAR-204 nomme d'ailleurs ce détour comme le contournement
+// connu.
+func (s *Server) handleSupprimerFichier(w http.ResponseWriter, r *http.Request, u *db.User) {
 	if err := r.ParseForm(); err != nil {
-		s.renderAccueil(w, http.StatusBadRequest, u, "formulaire invalide")
+		erreurHTTP(w, "formulaire invalide", http.StatusBadRequest)
 		return
 	}
-	chemin := perms.Canon(r.PostFormValue("chemin"))
-	// Même validation que POST /admin/dossiers/acces : un chemin qui ne peut pas
-	// devenir un dossier sur le poste d'un membre n'a rien à faire dans une
-	// cohorte non plus.
-	if espaces.ValidNom(chemin) != nil && espaces.ValidChemin(chemin) != nil {
-		s.renderAccueil(w, http.StatusBadRequest, u, "chemin invalide")
+	p := perms.Canon(r.PostFormValue("chemin"))
+	if storage.ValidPath(p) != nil {
+		erreurHTTP(w, "introuvable", http.StatusNotFound)
 		return
 	}
-	groupes, err := s.DB.ListGroupes()
+	// LECTURE D'ABORD : un compte qui ne voit pas ce chemin reçoit 404, pas 403.
+	// Un 403 lui apprendrait que le fichier existe.
+	if !s.canReadOr404(w, u, p) {
+		return
+	}
+	rules, err := s.DB.Rules(u.ID)
 	if err != nil {
 		erreurHTTP(w, "erreur interne", http.StatusInternalServerError)
 		return
 	}
-	connus := map[int64]bool{}
-	for _, g := range groupes {
-		connus[g.ID] = true
-	}
-	voulus := map[int64]bool{}
-	for _, brut := range r.PostForm["groupe_id"] {
-		brut = strings.TrimSpace(brut)
-		if brut == "" {
-			continue
-		}
-		id, err := strconv.ParseInt(brut, 10, 64)
-		if err != nil || !connus[id] {
-			s.renderAccueil(w, http.StatusBadRequest, u, "groupe introuvable")
-			return
-		}
-		voulus[id] = true
-	}
-
-	actuels, err := s.DB.GroupesDuChemin(chemin, "dossier")
-	if err != nil {
-		erreurHTTP(w, "erreur interne", http.StatusInternalServerError)
+	if !perms.CanWrite(p, u.DefaultLevel, rules) {
+		erreurHTTP(w, "écriture non autorisée", http.StatusForbidden)
 		return
 	}
-	// ON N'ÉCRIT QUE CE QUI CHANGE, et dans un ordre trié : sur échec au milieu,
-	// ce qui a survécu ne dépend pas de l'ordre de parcours d'une map.
-	dedans := map[int64]bool{}
-	for _, id := range actuels {
-		dedans[id] = true
-		if !voulus[id] {
-			if err := s.DB.SortChemin(id, chemin); err != nil {
-				log.Printf("web: sortie de %s du groupe %d : %v", chemin, id, err)
-				erreurHTTP(w, "erreur interne", http.StatusInternalServerError)
-				return
-			}
-		}
+	if path.Base(p) == espaces.FichierMeta {
+		erreurHTTP(w, "ce fichier fait exister l'espace : supprimez l'espace depuis l'accueil, "+
+			"ce qui vérifie d'abord qu'il est vide", http.StatusBadRequest)
+		return
 	}
-	ajouts := make([]int64, 0, len(voulus))
-	for id := range voulus {
-		if !dedans[id] {
-			ajouts = append(ajouts, id)
-		}
+	if r.PostFormValue("confirmation") != path.Base(p) {
+		erreurHTTP(w, "fichier non supprimé : le nom saisi ne correspond pas à « "+path.Base(p)+" »",
+			http.StatusBadRequest)
+		return
 	}
-	sort.Slice(ajouts, func(i, j int) bool { return ajouts[i] < ajouts[j] })
-	for _, id := range ajouts {
-		if err := s.DB.RangeChemin(id, chemin, "dossier", ""); err != nil {
-			log.Printf("web: rangement de %s dans le groupe %d : %v", chemin, id, err)
-			erreurHTTP(w, "erreur interne", http.StatusInternalServerError)
-			return
-		}
+	if _, err := s.Store.Delete(p, u.Username); err != nil {
+		log.Printf("web: suppression de %s : %v", p, err)
+		erreurHTTP(w, "suppression refusée", http.StatusBadRequest)
+		return
 	}
-	http.Redirect(w, r, hrefDossiers(chemin)+"?okc=1", http.StatusSeeOther)
+	http.Redirect(w, r, hrefDossiers(path.Dir(p)), http.StatusSeeOther)
 }
+
+// La route POST /admin/dossiers/cohortes a été RETIRÉE le 02/09, et le geste
+// n'a pas disparu : il a déménagé sur la cohorte (`/admin/cohortes`), qui est
+// l'objet dont on part vraiment.
+//
+// Elle n'est pas seulement retirée du gabarit. Une porte d'écriture qui ne
+// s'affiche plus mais répond toujours en HTTP est exactement la SECONDE
+// SURFACE AUTORITAIRE que `TestUneSeuleSurfaceAutoritaire` interdit : deux
+// écrans qui font tous les deux foi s'écrasent l'un l'autre dès que l'un est
+// resté ouvert pendant que l'autre enregistrait. L'invariant tient toujours ;
+// c'est le côté qui écrit qui a changé.
 
 // POST /admin/dossiers/defaut : poser ou retirer le niveau par défaut d'un
 // dossier.
@@ -561,6 +778,35 @@ func (s *Server) handleSetCohortes(w http.ResponseWriter, r *http.Request, u *db
 // tout le monde, y compris pour les comptes qui n'existent pas encore.
 //
 // Réservé aux administrateurs par sa route.
+// POST /admin/dossiers/espaces/supprimer : retirer un espace (DAR-204).
+//
+// `POST /espaces` créait, et RIEN ne supprimait. Le seul détour connu était de
+// retirer le `.vecu-espace.json` par `DELETE /files/…` - c'est-à-dire de
+// connaître le mécanisme interne, ce qu'on ne peut pas demander au mainteneur
+// d'un client.
+//
+// La confirmation est le NOM de l'espace, retapé, pour la même raison que sur la
+// fermeture d'un compte : le geste part d'une liste, et une case se coche par
+// réflexe. Le refus d'un espace non vide vit dans `espaces.Supprimer`, pas ici :
+// c'est une propriété du modèle, elle doit valoir pour tout appelant.
+func (s *Server) handleSupprimerEspace(w http.ResponseWriter, r *http.Request, u *db.User) {
+	if err := r.ParseForm(); err != nil {
+		s.renderAccueil(w, http.StatusBadRequest, u, "formulaire invalide")
+		return
+	}
+	nom := perms.Canon(r.PostFormValue("espace"))
+	if r.PostFormValue("confirmation") != nom {
+		s.renderAccueil(w, http.StatusBadRequest, u,
+			"espace non supprimé : le nom saisi ne correspond pas à « "+nom+" »")
+		return
+	}
+	if err := espaces.Supprimer(s.Store, nom, u.Username); err != nil {
+		s.renderAccueil(w, http.StatusBadRequest, u, "espace non supprimé : "+err.Error())
+		return
+	}
+	http.Redirect(w, r, "/admin/", http.StatusSeeOther)
+}
+
 func (s *Server) handleSetDefautDossier(w http.ResponseWriter, r *http.Request, u *db.User) {
 	if err := r.ParseForm(); err != nil {
 		s.renderAccueil(w, http.StatusBadRequest, u, "formulaire invalide")
@@ -571,21 +817,8 @@ func (s *Server) handleSetDefautDossier(w http.ResponseWriter, r *http.Request, 
 		s.renderAccueil(w, http.StatusBadRequest, u, "chemin invalide")
 		return
 	}
-
-	// LE GARDE ANTI-AUTO-ENFERMEMENT, mesuré AVANT le geste.
-	//
-	// `visibleFiles` s'appuie sur les règles de l'administrateur lui-même :
-	// fermer un dossier le ferme aussi pour lui, et il perd du même coup l'écran
-	// depuis lequel il pourrait revenir en arrière. On relève donc son niveau
-	// effectif d'avant, et on le lui rend en exception s'il allait tomber sous
-	// la lecture.
-	//
-	// POUR LUI SEUL. Écrire une règle pour des comptes que le geste ne visait
-	// pas les détacherait de leur défaut : invisible le jour même, faux pour
-	// toujours après (leçon du 21/08).
-	avant, err := s.DB.Effective(u, chemin)
-	if err != nil {
-		erreurHTTP(w, "erreur interne", http.StatusInternalServerError)
+	if refus := refusZoneSkills(chemin); refus != "" {
+		s.renderAccueil(w, http.StatusBadRequest, u, refus)
 		return
 	}
 
@@ -623,19 +856,89 @@ func (s *Server) handleSetDefautDossier(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	apres, err := s.DB.Effective(u, chemin)
-	if err != nil {
-		erreurHTTP(w, "erreur interne", http.StatusInternalServerError)
-		return
-	}
-	suffixe := "?okc=1"
-	if avant >= perms.Lecture && apres < perms.Lecture {
-		if err := s.DB.SetPermission(u.ID, chemin, avant); err != nil {
-			log.Printf("web: exception anti-enfermement sur %s : %v", chemin, err)
-			erreurHTTP(w, "erreur interne", http.StatusInternalServerError)
-			return
+	// LE GARDE ANTI-ENFERMEMENT EST RETIRE ICI (DAR-196, 01/09), et son retrait
+	// ferme un trou plutot qu'il n'en ouvre un.
+	//
+	// Il re-posait a l'auteur du geste une exception au niveau qu'il avait
+	// AVANT - donc l'ecriture - sur un dossier qu'il venait de declarer
+	// invisible. Il preservait l'administrabilite en lui rendant la LECTURE des
+	// fichiers, ce que les cinq autres portes ne font pas : mesure du 01/09, le
+	// contenu d'un fichier ferme restait servi par cette porte-la seulement.
+	//
+	// L'administrabilite est desormais portee par la vue (cheminsAdministrables),
+	// pour les six portes et sans rendre aucun droit de lecture. Un garde par
+	// porte est exactement ce qui avait produit une couverture d'un sixieme.
+	http.Redirect(w, r, hrefDossiers(chemin)+"?okc=1", http.StatusSeeOther)
+}
+
+// lisiblesParmi restreint une vue d'administration a ce que le lecteur peut
+// reellement ouvrir. Sert au bandeau des copies de conflit : y lister une copie
+// que le clic rend en 404 fabrique un lien mort, et le nom d'une copie porte la
+// date et l'auteur du conflit.
+func lisiblesParmi(chemins []string, u *db.User, rules []perms.Rule) []string {
+	out := make([]string, 0, len(chemins))
+	for _, p := range chemins {
+		if perms.CanRead(p, u.DefaultLevel, rules) {
+			out = append(out, p)
 		}
-		suffixe = "?okc=1&okd=1"
 	}
-	http.Redirect(w, r, hrefDossiers(chemin)+suffixe, http.StatusSeeOther)
+	return out
+}
+
+// libelleLisible rend le libelle d'un espace, ou la chaine vide si le lecteur
+// n'a pas le droit de le lire.
+//
+// Le libelle vit dans le fichier de metadonnees de l'espace, qui est un fichier
+// ORDINAIRE soumis aux memes droits que les autres (doctrine d'espaces.Create).
+// Le servir a un administrateur qui s'est ferme l'espace reviendrait a lui
+// servir du contenu ferme sur l'ecran qui pretend n'en pas servir.
+func libelleLisible(store *storage.Store, e espaces.Info, u *db.User, rules []perms.Rule) string {
+	if !perms.CanRead(e.Nom+"/", u.DefaultLevel, rules) {
+		return ""
+	}
+	return espaces.LitLibelle(store, e.Nom)
+}
+
+// refusZoneSkills rend le motif de refus d'un chemin de la zone skills, ou la
+// chaine vide.
+//
+// POURQUOI CE REFUS EXISTE. Les formulaires de droits acceptent un chemin TAPE
+// A LA MAIN, donc n'importe lequel, y compris sous `shared/skills/`. Le serveur
+// ecrivait la regle, puis renvoyait vers la page de ce dossier - que la vue
+// d'administration exclut par construction, un skill etant prive meme de
+// l'admin pour ses fichiers. L'auteur du geste atterrissait sur une erreur juste
+// apres son propre clic, sans savoir si sa regle avait pris. Elle avait pris.
+//
+// Deux regles du depot se contredisaient donc dans cette zone, et le code
+// tranchait en silence. Il le dit maintenant, et il renvoie a l'ecran qui sait
+// vraiment le faire.
+func refusZoneSkills(chemin string) string {
+	if skills.SousRacine(chemin) || perms.Canon(chemin) == skills.DefaultRoot {
+		return "les droits d'un skill se règlent sur l'écran des skills, pas ici"
+	}
+	return ""
+}
+
+// origineEnClair : le barreau de l'echelle, dit a quelqu'un qui n'a pas lu le
+// code.
+//
+// Le vocabulaire evite « regle », « exception » et « resolution » : le lecteur
+// de cet ecran est le mainteneur du second cerveau chez un client, pas nous. Ce
+// qu'il doit pouvoir deduire de la phrase, c'est OU aller pour changer le droit.
+func origineEnClair(o db.Origine) string {
+	switch o.Barreau {
+	case "exception":
+		return "posé sur ce compte"
+	case "cohorte":
+		if o.Cohorte != "" {
+			return "par la cohorte " + o.Cohorte
+		}
+		return "par une cohorte"
+	case "defaut":
+		return "défaut du compte sur ce chemin"
+	case "dossier":
+		return "défaut de ce dossier"
+	default:
+		return "défaut du compte"
+	}
 }

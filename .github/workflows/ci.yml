@@ -1,0 +1,250 @@
+name: CI
+
+# Ce workflow existe pour une raison précise, née du port Windows le 06/09 : il
+# n'y a pas de machine Windows à la maison, et un `GOOS=windows go build` vert
+# n'atteste que la bonne formation du code, jamais son comportement. Le runner
+# `windows-latest` EST la machine Windows. C'est lui qui exerce le verrou
+# `LockFileEx`, le Planificateur de tâches, le parseur PowerShell et le moteur de
+# synchronisation sur du vrai NTFS.
+#
+# Ce qu'il ne peut pas faire, et qu'il ne faut pas lui prêter : il est HEADLESS.
+# L'icône dans la zone de notification et l'apparence des dialogues restent à
+# vérifier par un humain devant un écran.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    name: macOS (référence)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Vet
+        run: go vet ./...
+      - name: Tests
+        run: go test ./...
+      - name: L'arbre compile pour Windows
+        run: make verif-windows
+
+  windows:
+    name: Windows (la mesure qui manquait)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Vet
+        run: go vet ./client/... ./desktop/... ./appupdate/...
+
+      # Le périmètre du port, et lui seul. Le serveur tourne déjà en production
+      # sur Linux : sa portabilité est prouvée par l'usage, pas par ce runner.
+      # `continue-on-error` sur CHAQUE étape de mesure, et c'est délibéré : ce
+      # job existe pour « écrire ce qui casse », pas pour s'arrêter au premier
+      # symptôme. Un job qui abandonne à la première étape rouge ne rend qu'un
+      # défaut par run, là où on veut l'inventaire. Le verdict est rendu par
+      # l'étape de synthèse, à la fin, qui fait échouer le job.
+      - name: Tests natifs (verrou, chemins, moteur de synchro sur NTFS)
+        id: client
+        continue-on-error: true
+        # `-timeout 30m` : le defaut de Go est 10 minutes, et la suite les
+        # depasse sur ce runner. Elle met ~600 s la ou macOS met ~100 s - un
+        # facteur six qui vient du disque, pas du code (le moteur de synchro
+        # ecrit et relit beaucoup de petits fichiers, ce que NTFS sur machine
+        # virtuelle paie cher). A surveiller : si le facteur grandit, c'est le
+        # signe d'autre chose.
+        run: go test -timeout 30m -v ./client/... ./appupdate/...
+
+      - name: Tests natifs desktop (Planificateur de tâches, PowerShell)
+        id: desktop
+        continue-on-error: true
+        run: go test -timeout 20m -v ./desktop/...
+
+      - name: Le binaire se construit et démarre
+        id: binaire
+        continue-on-error: true
+        run: |
+          go build -ldflags "-X main.version=ci-test -H windowsgui" -o vecu-app.exe ./desktop
+          # Start-Process -Wait, et PAS `& .\vecu-app.exe`. PowerShell N'ATTEND PAS
+          # un processus du sous-système graphique : l'appel direct rendait une
+          # chaîne vide et donnait à croire que le binaire n'écrivait rien, alors
+          # qu'il n'avait simplement pas encore tourné. Le vrai contrat de la
+          # sonde d'auto-update est testé en Go
+          # (TestLaSondeDeSanteLitUnBinaireSansConsole) : c'est là que la réponse
+          # compte, puisque c'est comme ça que le produit appelle.
+          $p = Start-Process -FilePath .\vecu-app.exe -ArgumentList "--check" -Wait -PassThru -NoNewWindow
+          Write-Output "le binaire se lance et se termine (code $($p.ExitCode))"
+          if ($p.ExitCode -ne 0) { throw "le binaire sort en $($p.ExitCode)" }
+
+      # `os.Symlink` exige le mode développeur ou des droits d'administrateur sur
+      # Windows. On MESURE ce que fait la machine plutôt que de le supposer :
+      # la projection des skills doit dégrader proprement quand il échoue, jamais
+      # casser la synchronisation.
+      - name: Ce que fait os.Symlink sur cette machine
+        if: always()
+        shell: pwsh
+        run: |
+          @'
+          package main
+          import ("fmt"; "os"; "path/filepath")
+          func main() {
+            d, _ := os.MkdirTemp("", "lien")
+            cible := filepath.Join(d, "cible")
+            os.MkdirAll(cible, 0o755)
+            err := os.Symlink(cible, filepath.Join(d, "lien"))
+            if err != nil { fmt.Println("SYMLINK REFUSÉ :", err) } else { fmt.Println("SYMLINK ACCEPTÉ") }
+          }
+          '@ | Set-Content -Path lien.go -Encoding utf8
+          go run lien.go
+        continue-on-error: true
+
+
+      # LE RENDU, pas la syntaxe. Le parseur PowerShell dit qu'un script est bien
+      # formé ; il ne dit pas qu'un bouton tient dans le cadre, qu'un libellé
+      # accentué n'est pas coupé, ni que la fenêtre passe devant les autres.
+      # Cette étape AFFICHE chaque dialogue sur le bureau du runner et le
+      # photographie. Les images partent en artefact et se regardent.
+      - name: Photographier les sept dialogues
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $env:VECU_APERCU = "$PWD\apercu"
+          go test ./desktop -run TestApercuDialogues -v
+
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $ecran = [System.Windows.Forms.SystemInformation]::VirtualScreen
+          Write-Output "bureau du runner : $($ecran.Width)x$($ecran.Height)"
+
+          function Photographie($chemin) {
+            $b = New-Object System.Drawing.Bitmap($ecran.Width, $ecran.Height)
+            $g = [System.Drawing.Graphics]::FromImage($b)
+            $g.CopyFromScreen($ecran.X, $ecran.Y, 0, 0, $b.Size)
+            $b.Save($chemin, [System.Drawing.Imaging.ImageFormat]::Png)
+            $g.Dispose(); $b.Dispose()
+          }
+
+          foreach ($f in Get-ChildItem apercu\*.ps1 | Sort-Object Name) {
+            # Lancé dans un AUTRE processus : le dialogue bloque sur ShowDialog,
+            # donc on ne peut pas l'afficher et le photographier depuis le même.
+            $p = Start-Process pwsh -PassThru -ArgumentList @(
+              "-NoProfile", "-Sta", "-File", $f.FullName)
+            Start-Sleep -Seconds 3
+            Photographie "apercu\$($f.BaseName).png"
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 400
+            Write-Output "photographié : $($f.BaseName)"
+          }
+
+      # L'ICÔNE dans la zone de notification. C'est le dernier point que je
+      # déclarais « demande un humain » : le runner a un bureau, donc il peut
+      # lancer l'app et photographier le coin bas-droite.
+      - name: Photographier l'icône de la zone de notification
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          go build -ldflags "-X main.version=apercu -H windowsgui" -o vecu-app.exe ./desktop
+          $env:VECU_DIR = "$PWD\faux-vault"
+          New-Item -ItemType Directory -Force -Path $env:VECU_DIR | Out-Null
+          $env:VECU_SERVICE = "1"   # instance de service : elle tient l'icône
+          $p = Start-Process .\vecu-app.exe -PassThru
+          Start-Sleep -Seconds 8
+
+          Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+          $e = [System.Windows.Forms.SystemInformation]::VirtualScreen
+          # La zone de notification vit en bas à droite : on cadre large autour.
+          $l = [Math]::Min(760, $e.Width); $h = [Math]::Min(120, $e.Height)
+          $b = New-Object System.Drawing.Bitmap($l, $h)
+          $g = [System.Drawing.Graphics]::FromImage($b)
+          $g.CopyFromScreen($e.X + $e.Width - $l, $e.Y + $e.Height - $h, 0, 0, $b.Size)
+          $b.Save("apercu\8-zone-de-notification.png", [System.Drawing.Imaging.ImageFormat]::Png)
+          $g.Dispose(); $b.Dispose()
+
+          # Le bureau entier aussi : si l'icône manque, la vue large dit pourquoi
+          # (fenêtre d'erreur, écran de session, rien du tout).
+          $b2 = New-Object System.Drawing.Bitmap($e.Width, $e.Height)
+          $g2 = [System.Drawing.Graphics]::FromImage($b2)
+          $g2.CopyFromScreen($e.X, $e.Y, 0, 0, $b2.Size)
+          $b2.Save("apercu\9-bureau-entier.png", [System.Drawing.Imaging.ImageFormat]::Png)
+          $g2.Dispose(); $b2.Dispose()
+
+          # WINDOWS MASQUE LES NOUVELLES ICÔNES derrière le chevron « ^ » de la
+          # barre des tâches : ne pas en voir une sur la première photo ne prouve
+          # rien. On ouvre donc le débordement avant de conclure.
+          # Signature sur UNE ligne, et pas un here-string : le terminateur « '@ »
+          # d'un here-string PowerShell doit commencer la ligne, ce qui le met
+          # moins indenté que le bloc YAML qui l'entoure - et casse le fichier.
+          $sig = '[DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y); [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint x, uint y, uint d, int i);'
+          Add-Type -Namespace W -Name Souris -MemberDefinition $sig
+          $chevronX = $e.X + $e.Width - 206
+          $chevronY = $e.Y + $e.Height - 24
+          Write-Output "clic sur le chevron en ($chevronX, $chevronY)"
+          [W.Souris]::SetCursorPos($chevronX, $chevronY)
+          Start-Sleep -Milliseconds 500
+          [W.Souris]::mouse_event(0x02, 0, 0, 0, 0)   # bouton gauche enfoncé
+          [W.Souris]::mouse_event(0x04, 0, 0, 0, 0)   # relâché
+          Start-Sleep -Seconds 2
+
+          $l3 = [Math]::Min(520, $e.Width); $h3 = [Math]::Min(320, $e.Height)
+          $b3 = New-Object System.Drawing.Bitmap($l3, $h3)
+          $g3 = [System.Drawing.Graphics]::FromImage($b3)
+          $g3.CopyFromScreen($e.X + $e.Width - $l3, $e.Y + $e.Height - $h3, 0, 0, $b3.Size)
+          $b3.Save("apercu\\10-debordement-ouvert.png", [System.Drawing.Imaging.ImageFormat]::Png)
+          $g3.Dispose(); $b3.Dispose()
+
+          Write-Output "processus vivant : $(-not $p.HasExited)"
+
+          # LA PREUVE DE NIVEAU PRODUIT, et elle vaut mieux qu'un pixel.
+          #
+          # `onReady` est la fonction où l'icône est posée et où le moteur démarre.
+          # Elle n'est atteinte que si systray a réussi son enregistrement auprès
+          # du shell ; si l'icône n'avait pas pu être créée, on n'y arriverait
+          # jamais et le journal serait vide ou porterait la panique. Lire le
+          # journal dit donc ce qu'une capture d'écran ne dit pas : l'icône n'est
+          # pas seulement dessinée quelque part, elle est ENREGISTRÉE.
+          $logs = Join-Path $env:LOCALAPPDATA "Vecu\Logs"
+          Write-Output "--- journaux dans $logs ---"
+          if (Test-Path $logs) {
+            Get-ChildItem $logs | ForEach-Object {
+              Write-Output ">>> $($_.Name) ($($_.Length) octets)"
+              Get-Content $_.FullName -Tail 25 | ForEach-Object { Write-Output "    $_" }
+            }
+          } else {
+            Write-Output "AUCUN journal : l'app n'est pas allée jusqu'à onReady"
+          }
+
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+
+      - name: Déposer les images
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: apercu-dialogues
+          path: apercu/*.png
+          if-no-files-found: warn
+
+      # Le verdict. Sans cette étape, `continue-on-error` rendrait le job vert
+      # quoi qu'il arrive - exactement le genre d'instrument qui ment.
+      - name: Verdict
+        if: always()
+        shell: pwsh
+        run: |
+          $r = @{
+            "client+appupdate" = "${{ steps.client.outcome }}"
+            "desktop"          = "${{ steps.desktop.outcome }}"
+            "binaire"          = "${{ steps.binaire.outcome }}"
+          }
+          $r.GetEnumerator() | ForEach-Object { Write-Output "$($_.Key) : $($_.Value)" }
+          if ($r.Values -contains "failure") { throw "au moins une mesure a échoué (voir ci-dessus)" }

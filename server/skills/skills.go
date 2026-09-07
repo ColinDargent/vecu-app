@@ -26,6 +26,23 @@ import (
 // une valeur unique suffit à la v1 (cf. amendement spec : shared/skills).
 const DefaultRoot = "shared/skills"
 
+// SousRacine indique si `p` appartient a la zone skills.
+//
+// UNE SEULE definition, appelee par tous les court-circuits admin du depot
+// (export ZIP, vue d'administration). La recopier a chaque appelant est
+// exactement ce qui a produit le garde anti-enfermement present sur une porte
+// d'ecriture sur six.
+//
+// CE QUE CETTE ZONE BORNE, exactement : les FICHIERS d'un skill. Pas son
+// existence - `/admin/skills` donne depuis le 21/08 un plancher lecture a tout
+// administrateur sur le nom et la description de chaque skill, en renversant F3
+// en connaissance de cause (voir skillsDuDepot). Ecrire ici « un skill est
+// prive meme de l'admin » serait faux, et cette definition sert de reference a
+// trois appelants.
+func SousRacine(p string) bool {
+	return strings.HasPrefix(perms.Canon(p), DefaultRoot+"/")
+}
+
 // skillFile : le fichier qui porte le frontmatter d'un skill.
 const skillFile = "SKILL.md"
 

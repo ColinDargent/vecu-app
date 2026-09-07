@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+
+	"github.com/colindargent/vecu/client/sync"
 )
 
 // appConfig : réglages propres à l'app de bureau, distincts de la config du
@@ -13,13 +15,11 @@ type appConfig struct {
 	Racine string `json:"racine"`
 }
 
-// cheminAppConfig : ~/Library/Application Support/Vecu/app.json.
+// cheminAppConfig : `app.json` dans le dossier d'application (voir
+// sync.DossierApplication) - ~/Library/Application Support/Vecu sur macOS,
+// %AppData%\Vecu sur Windows.
 func cheminAppConfig() string {
-	maison, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(maison, "Library", "Application Support", "Vecu", "app.json")
+	return filepath.Join(sync.DossierApplication(), "app.json")
 }
 
 // racineAppConfig lit la racine mémorisée, ou "" si le fichier est absent ou

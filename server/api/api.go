@@ -41,9 +41,7 @@ func skillSlug(p string) string {
 // sousSkills indique si `p` appartient à la zone skills (shared/skills/…). Sur
 // cette zone, AUCUNE exemption admin ne s'applique : un skill est privé même de
 // l'admin (modèle F3). Sert à borner les rares court-circuits admin (export ZIP).
-func sousSkills(p string) bool {
-	return strings.HasPrefix(perms.Canon(p), skills.DefaultRoot+"/")
-}
+func sousSkills(p string) bool { return skills.SousRacine(p) }
 
 // maxBodyBytes borne la taille d'un corps de PUT (garde-fou v1, vault de notes).
 const maxBodyBytes = 32 << 20 // 32 Mio
@@ -63,6 +61,19 @@ type Server struct {
 	// est le bon comportement pour un déploiement qui n'a pas câblé le magasin
 	// plutôt qu'un panic sur un pointeur nul.
 	Tickets *tickets.Store
+	// Logf : journal du serveur, injectable. Nil = silencieux, ce qui est le bon
+	// défaut pour les tests. Le binaire y pose `log.Printf`. Sert aujourd'hui à
+	// la surface MCP, dont la négociation de révision ne s'observe que dans les
+	// logs du premier branchement d'un vrai client.
+	Logf func(string, ...any)
+}
+
+// logf : journal best-effort. Un serveur sans `Logf` ne journalise pas, et
+// aucun appelant n'a à le savoir.
+func (s *Server) logf(format string, args ...any) {
+	if s.Logf != nil {
+		s.Logf(format, args...)
+	}
 }
 
 func (s *Server) now() time.Time {
@@ -88,9 +99,15 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /espaces", s.auth(http.HandlerFunc(s.handleCreerEspace)))
 	mux.Handle("GET /tree", s.auth(http.HandlerFunc(s.handleTree)))
 	mux.Handle("GET /sync", s.auth(http.HandlerFunc(s.handleSync)))
-	mux.Handle("GET /files/{path...}", s.auth(http.HandlerFunc(s.handleGetFile)))
-	mux.Handle("PUT /files/{path...}", s.auth(http.HandlerFunc(s.handlePutFile)))
-	mux.Handle("DELETE /files/{path...}", s.auth(http.HandlerFunc(s.handleDeleteFile)))
+	// Les trois routes fichiers acceptent AUSSI un jeton MCP, plafond compris :
+	// c'est ce qui permet à une routine cloud d'écrire en HTTP simple plutôt
+	// qu'en JSON-RPC, sans renoncer à un jeton révocable et traçable.
+	mux.Handle("GET /files/{path...}", s.authFichiers(http.HandlerFunc(s.handleGetFile)))
+	mux.Handle("PUT /files/{path...}", s.authFichiers(http.HandlerFunc(s.handlePutFile)))
+	mux.Handle("DELETE /files/{path...}", s.authFichiers(http.HandlerFunc(s.handleDeleteFile)))
+	// Le poste dit où il en est, à la fin de chaque cycle. Jeton d'APPAREIL
+	// seul : `s.auth` ne résout que `device_tokens`. Voir `etat.go`.
+	mux.Handle("POST /etat", s.auth(http.HandlerFunc(s.handleEtat)))
 	mux.Handle("GET /log/{path...}", s.auth(http.HandlerFunc(s.handleLog)))
 	mux.Handle("POST /restore/{path...}", s.auth(http.HandlerFunc(s.handleRestore)))
 	mux.Handle("GET /export", s.auth(http.HandlerFunc(s.handleExport)))
@@ -108,6 +125,11 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /session-web", s.auth(http.HandlerFunc(s.handleSessionWeb)))
 	mux.Handle("GET /app/manifest", s.auth(http.HandlerFunc(s.handleAppManifest)))
 	mux.Handle("GET /app/download", s.auth(http.HandlerFunc(s.handleAppDownload)))
+	// La surface MCP. Elle ne passe PAS par `s.auth` : son jeton n'est pas un
+	// jeton d'appareil, il porte en plus un plafond. POST seul - `ServeMux`
+	// répond 405 de lui-même sur GET et DELETE, ce que la révision 2026-07-28
+	// demande justement pour un client de l'ère des sessions.
+	mux.HandleFunc("POST /mcp", s.handleMCP)
 	return mux
 }
 
@@ -171,6 +193,79 @@ func (s *Server) auth(next http.Handler) http.Handler {
 }
 
 func userFrom(r *http.Request) *db.User { return r.Context().Value(userKey).(*db.User) }
+
+// appelant : qui fait cette requête, et sous quelle contrainte.
+//
+// Deux sortes de jetons atteignent les routes fichiers : le jeton d'APPAREIL
+// d'un poste synchronisé, et le jeton MCP d'un programme (routine cloud,
+// agent). Le second porte un PLAFOND, et c'est toute la différence : il doit
+// s'appliquer ici exactement comme sur la porte `/mcp`, sinon un jeton
+// « lecture » écrirait en passant par l'API et la propriété centrale du jalon
+// tomberait.
+type appelant struct {
+	user *db.User
+	// porteur : non nil quand l'appel vient d'un jeton MCP.
+	porteur *db.PorteurMCP
+}
+
+const appelantKey ctxKey = 1
+
+func appelantDe(r *http.Request) appelant {
+	a, _ := r.Context().Value(appelantKey).(appelant)
+	return a
+}
+
+// authFichiers : l'authentification des routes `/files/...`, et d'elles seules.
+//
+// POURQUOI PAS `s.auth` ÉLARGI. Accepter un jeton MCP partout ouvrirait aussi
+// `/export` (dont le ZIP a un court-circuit admin), `/sync`, `/log`,
+// `/restore`, `/skills` et `/session-web` - toutes des surfaces où le plafond
+// du jeton n'est pas câblé. Élargir en bloc aurait donné à un jeton ce qu'aucun
+// écran ne peut lui retirer. Les routes fichiers sont le périmètre exact dont
+// une routine a besoin.
+func (s *Server) authFichiers(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token, ok := bearer(r)
+		if !ok {
+			writeErr(w, http.StatusUnauthorized, "jeton manquant")
+			return
+		}
+		// Le jeton d'appareil D'ABORD : c'est le cas courant (chaque poste
+		// synchronise en permanence), et les deux magasins de hash sont
+		// disjoints, donc l'ordre ne change rien au verdict.
+		if u, err := s.DB.UserByToken(token); err == nil {
+			s.servirAppelant(w, r, next, appelant{user: u})
+			return
+		} else if !errors.Is(err, db.ErrNotFound) {
+			writeErr(w, http.StatusInternalServerError, "erreur interne")
+			return
+		}
+		porteur, err := s.DB.PorteurParJetonMCP(token)
+		if errors.Is(err, db.ErrNotFound) {
+			// Inconnu et révoqué rendent le même refus, comme sur `/mcp`.
+			writeErr(w, http.StatusUnauthorized, "jeton invalide")
+			return
+		}
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "erreur interne")
+			return
+		}
+		// `dernier_usage` avance : c'est un appel accepté, et cette colonne est
+		// la seule chose qui rende repérable un jeton oublié dans une config.
+		// Sans ça, le jeton effectivement en production serait le seul à
+		// paraître mort. Best-effort.
+		if err := s.DB.ToucheJetonMCP(porteur.JetonID); err != nil {
+			s.logf("api : dernier_usage non mis à jour (jeton %d) : %v", porteur.JetonID, err)
+		}
+		s.servirAppelant(w, r, next, appelant{user: porteur.Compte(), porteur: porteur})
+	})
+}
+
+func (s *Server) servirAppelant(w http.ResponseWriter, r *http.Request, next http.Handler, a appelant) {
+	ctx := context.WithValue(r.Context(), userKey, a.user)
+	ctx = context.WithValue(ctx, appelantKey, a)
+	next.ServeHTTP(w, r.WithContext(ctx))
+}
 
 // GET /tree : liste des chemins visibles (lecture ou plus) par l'utilisateur.
 func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
@@ -299,14 +394,18 @@ func (s *Server) handleCreerEspace(w http.ResponseWriter, r *http.Request) {
 // Un chemin hors droit renvoie 404 (indistinguable d'un fichier inexistant :
 // on ne révèle pas l'existence d'un contenu hors périmètre).
 func (s *Server) handleGetFile(w http.ResponseWriter, r *http.Request) {
-	u := userFrom(r)
 	p := r.PathValue("path")
-	rules, err := s.DB.Rules(u.ID)
+	// LE MÊME calcul de droit que l'écriture, plafond du jeton compris. Un
+	// `perms.CanRead(p, u.DefaultLevel, rules)` écrit ici ignorerait le
+	// plafond - il n'a aujourd'hui aucun effet sur la lecture, mais poser
+	// l'exception ici la rendrait invisible le jour où un plafond plus fin
+	// existera.
+	e, err := s.ecrivainDe(appelantDe(r))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "erreur interne")
 		return
 	}
-	if !perms.CanRead(p, u.DefaultLevel, rules) {
+	if e.niveau(p) < perms.Lecture {
 		writeErr(w, http.StatusNotFound, "introuvable")
 		return
 	}
@@ -332,6 +431,13 @@ func (s *Server) handleGetFile(w http.ResponseWriter, r *http.Request) {
 type putRequest struct {
 	Content string `json:"content"`
 	BaseOID string `json:"base_oid"` // version que le client détenait (curseur de sync)
+	// EmpreinteAttendue : ce que le client croit REMPLACER à ce chemin (DAR-114).
+	//
+	// Facultatif, et c'est ce qui rend son déploiement sûr : vide, la garde
+	// d'écho est désactivée et le serveur se comporte exactement comme avant.
+	// Un client d'une version antérieure ne l'envoie pas et ne casse pas ; il
+	// n'est simplement pas protégé.
+	EmpreinteAttendue string `json:"empreinte_attendue,omitempty"`
 }
 
 // writeResponse : issue d'une écriture, renvoyée au client.
@@ -343,137 +449,72 @@ type writeResponse struct {
 }
 
 // PUT /files/{path...} : écriture avec base_oid et fusion (modèle Dropbox).
-// L'écriture exige le droit d'écriture ; un chemin hors droit renvoie 404
-// (comme la lecture, on ne révèle pas l'existence hors périmètre).
+//
+// Le corps de cette écriture vit dans `ecriture.go`, PARTAGÉ avec la porte MCP.
+// Ce handler n'est plus que le transport : décoder, appeler, traduire le refus
+// en code HTTP. C'est ce qui garantit que les deux portes ne peuvent pas
+// diverger - il n'y a qu'un seul jeu de contrôles d'accès à maintenir.
 func (s *Server) handlePutFile(w http.ResponseWriter, r *http.Request) {
-	u := userFrom(r)
 	p := r.PathValue("path")
 
-	// Tout fichier vit dans un espace au nom valide. Contrôlé AVANT les droits :
-	// c'est la forme du chemin qui est en cause, pas le périmètre, et un chemin
-	// accepté ici mais orphelin serait stocké puis synchronisé nulle part.
+	// AVANT le décodage du corps, comme dans la version d'origine : c'est la
+	// forme du chemin qui est en cause, et un corps illisible masquerait ce
+	// diagnostic-là. `ecrisFichier` le revérifie pour son propre compte - c'est
+	// une validation, pas un chemin d'écriture, et la dupliquer ne fait dériver
+	// personne.
 	if err := espaces.ValidChemin(p); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-
 	var req putRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "corps JSON invalide")
 		return
 	}
-	rules, err := s.DB.Rules(u.ID)
+	e, err := s.ecrivainDe(appelantDe(r))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "erreur interne")
 		return
 	}
-	// Appropriation d'un skill : la PREMIÈRE écriture sous shared/skills/<slug>/
-	// (aucun fichier du skill n'existe encore dans le dépôt) est une CRÉATION,
-	// autorisée pour tout compte authentifié malgré le « shared/skills = invisible »
-	// par défaut. La revendication est atomique (claim + grant écriture dans une
-	// transaction) et se fait AVANT l'écriture : le gagnant écrit en propriétaire,
-	// un créateur concurrent perdant retombe sur les droits normaux (donc refusé,
-	// il n'écrit pas). Un skill déjà existant (fichiers présents dans git) n'est
-	// jamais « créable » : on ne le revendique pas, ses écritures suivent les
-	// droits normaux - un compte tiers ne peut pas s'en emparer.
-	slug := skillSlug(p)
-	creation := false
-	if slug != "" && !s.Store.Exists(skills.DefaultRoot+"/"+slug) {
-		claimed, err := s.DB.ClaimSkill(slug, skills.DefaultRoot+"/"+slug, u.ID)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "erreur interne")
-			return
-		}
-		creation = claimed
-	}
-	if !creation {
-		if !perms.CanRead(p, u.DefaultLevel, rules) {
-			writeErr(w, http.StatusNotFound, "introuvable")
-			return
-		}
-		if !perms.CanWrite(p, u.DefaultLevel, rules) {
-			writeErr(w, http.StatusForbidden, "écriture non autorisée")
-			return
-		}
-	}
-
-	// Création d'un espace par écriture : refuser un homonyme de casse
-	// différente. APFS et HFS+ étant insensibles à la casse, « clients » et
-	// « Clients » atterriraient dans un seul dossier local ; la sync verrait
-	// alors les fichiers de l'un comme supprimés et ceux de l'autre comme
-	// nouveaux, et déplacerait le contenu d'un périmètre de droits vers l'autre.
-	// Le parcours ne coûte que sur le premier fichier d'un espace.
-	if nom, _, _ := strings.Cut(p, "/"); !s.Store.Exists(nom) {
-		occupation, err := espaces.Occupation(s.Store, nom)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "erreur interne")
-			return
-		}
-		if occupation != espaces.Libre {
-			writeErr(w, http.StatusBadRequest,
-				"un espace ou un fichier porte déjà ce nom avec une casse différente : "+nom)
-			return
-		}
-	}
-
-	res, err := s.Store.WriteMerge(p, req.Content, u.Username, req.BaseOID, conflictName(p, u.Username, s.now()))
+	res, err := s.ecrisFichier(e, p, req.Content, req.BaseOID, req.EmpreinteAttendue)
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "écriture refusée")
+		status, msg := statutDe(err)
+		writeErr(w, status, msg)
 		return
 	}
-	// La copie de conflit naît dans le dossier de l'original : couverte par la
-	// même règle quand le droit vient d'un dossier ancêtre. Limite connue : si
-	// le droit du client vient d'une règle posée sur le fichier précis, la
-	// copie n'est pas couverte et peut sortir de son périmètre (elle reste
-	// visible de l'admin, rien n'est perdu).
-	writeJSON(w, http.StatusOK, writeResponse{
-		Head: res.Head, Merged: res.Merged,
-		Conflict: res.Conflict, ConflictPath: res.ConflictPath,
-	})
+	// La trace qui nomme le jeton, comme sur la porte `/mcp` : une écriture de
+	// programme doit rester distinguable d'une écriture de poste.
+	if a := appelantDe(r); a.porteur != nil {
+		s.journaliseEcritureMCP(a.porteur, "écrit (api)", p, res)
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 // DELETE /files/{path...} : suppression avec base_oid et fusion.
+//
+// Même partage que le PUT : le corps vit dans `ecriture.go`.
 func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
-	u := userFrom(r)
 	p := r.PathValue("path")
-	baseOID := r.URL.Query().Get("base_oid")
 
-	// La même garde que le PUT, et pour la même raison : depuis que la suppression
-	// range la version de main dans une copie, ce handler ÉCRIT. Sans ce contrôle
-	// il pourrait déposer une copie sur un chemin que le PUT refuse - hors espace,
-	// donc hors de tout dossier local, donc une copie que la sync ne peut ni
-	// descendre ni effacer.
-	if err := espaces.ValidChemin(p); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	rules, err := s.DB.Rules(u.ID)
+	e, err := s.ecrivainDe(appelantDe(r))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "erreur interne")
 		return
 	}
-	if !perms.CanRead(p, u.DefaultLevel, rules) {
-		writeErr(w, http.StatusNotFound, "introuvable")
-		return
-	}
-	if !perms.CanWrite(p, u.DefaultLevel, rules) {
-		writeErr(w, http.StatusForbidden, "écriture non autorisée")
-		return
-	}
-	res, err := s.Store.DeleteMerge(p, u.Username, baseOID, conflictName(p, u.Username, s.now()))
+	res, err := s.supprimeFichier(e, p, r.URL.Query().Get("base_oid"))
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, "suppression refusée")
+		status, msg := statutDe(err)
+		writeErr(w, status, msg)
 		return
+	}
+	if a := appelantDe(r); a.porteur != nil {
+		s.journaliseEcritureMCP(a.porteur, "supprimé (api)", p, res)
 	}
 	// `ConflictPath` rendu, comme pour l'écriture : une suppression qui croise
 	// une modification range désormais cette modification dans une copie, et le
 	// client doit pouvoir la nommer. Sans ce champ, la seule trace émise par ce
 	// chemin annonçait « copie créée () ».
-	writeJSON(w, http.StatusOK, writeResponse{
-		Head: res.Head, Merged: res.Merged,
-		Conflict: res.Conflict, ConflictPath: res.ConflictPath,
-	})
+	writeJSON(w, http.StatusOK, res)
 }
 
 // conflictName forge le nom de la copie de conflit :

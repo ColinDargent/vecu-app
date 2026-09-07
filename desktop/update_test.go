@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"testing"
 
@@ -134,6 +135,18 @@ func TestChercheMaj_CibleAbsente(t *testing.T) {
 // d'un vrai build.
 func script(t *testing.T, dir, sortie string, code int) string {
 	t.Helper()
+	// Le faux binaire de ces tests est un script « #!/bin/sh », qu'aucun Windows
+	// ne sait exécuter. Sauter ici plutôt que dans chaque test : un seul endroit
+	// sait pourquoi, et il le dit.
+	//
+	// Ce n'est PAS un trou de couverture : l'équivalent Windows existe et il est
+	// plus proche du réel, puisqu'il construit un vrai binaire Go marqué
+	// « -H windowsgui » et le passe à la même `sondeSante` -
+	// TestLaSondeDeSanteLitUnBinaireSansConsole, dans service_windows_test.go.
+	if runtime.GOOS == "windows" {
+		t.Skip("faux binaire = script shell ; couvert sur Windows par TestLaSondeDeSanteLitUnBinaireSansConsole")
+	}
+	t.Helper()
 	p := filepath.Join(dir, "faux-binaire")
 	corps := "#!/bin/sh\necho " + sortie + "\nexit " + strconv.Itoa(code) + "\n"
 	if err := os.WriteFile(p, []byte(corps), 0o755); err != nil {
@@ -154,8 +167,13 @@ func TestEcritTempEtBascule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ecritTemp : %v", err)
 	}
-	if info, _ := os.Stat(tmp); info.Mode().Perm() != 0o755 {
-		t.Fatalf("temp mode = %v, attendu 0755", info.Mode().Perm())
+	// Le bit exécutable n'existe pas sur Windows : `os.Chmod` n'y porte que le
+	// drapeau lecture seule, et l'exécutabilité vient de l'extension et de
+	// l'en-tête PE - ce dont `suffixeExecutable` se charge dans ecritTemp.
+	if runtime.GOOS != "windows" {
+		if info, _ := os.Stat(tmp); info.Mode().Perm() != 0o755 {
+			t.Fatalf("temp mode = %v, attendu 0755", info.Mode().Perm())
+		}
 	}
 	if err := bascule(tmp, cible); err != nil {
 		t.Fatalf("bascule : %v", err)
@@ -196,6 +214,13 @@ func TestSondeSante(t *testing.T) {
 // remplaceBinaire complet : un « binaire » sain (script imprimant la version)
 // passe la sonde et remplace la cible.
 func TestRemplaceBinaire_Sonde(t *testing.T) {
+	// Le faux binaire est un script « #!/bin/sh ». Windows tente de le charger
+	// comme un exécutable PE et répond « This version of %1 is not compatible ».
+	// Le chemin équivalent y est couvert par TestLaSondeDeSanteLitUnBinaireSansConsole,
+	// qui construit un vrai binaire Go et le passe à la même `sondeSante`.
+	if runtime.GOOS == "windows" {
+		t.Skip("faux binaire = script shell ; couvert par TestLaSondeDeSanteLitUnBinaireSansConsole")
+	}
 	dir := t.TempDir()
 	cible := filepath.Join(dir, "vecu-app")
 	if err := os.WriteFile(cible, []byte("#!/bin/sh\necho ANCIEN\n"), 0o755); err != nil {

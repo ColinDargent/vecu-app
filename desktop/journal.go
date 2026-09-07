@@ -75,6 +75,29 @@ func (j *journalTournant) ouvre() error {
 	return nil
 }
 
+// Close relâche le fichier courant.
+//
+// AJOUTÉ PENDANT LE PORT WINDOWS, et le manque n'était pas anodin. Le journal
+// gardait son descripteur ouvert pour la vie du processus, sans aucun moyen de
+// le relâcher : invisible sur macOS, où un fichier ouvert se supprime et se
+// renomme sans broncher, mais bloquant sur Windows, qui refuse les deux tant
+// qu'un handle vit. Un retrait de l'app, ou tout simplement le ménage d'un
+// test, butait dessus avec « The process cannot access the file because it is
+// being used by another process ».
+//
+// Idempotent : appeler deux fois ne rend pas d'erreur. C'est ce qui permet de
+// le poser en `defer` sans se demander qui ferme.
+func (j *journalTournant) Close() error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if j.f == nil {
+		return nil
+	}
+	err := j.f.Close()
+	j.f = nil
+	return err
+}
+
 func (j *journalTournant) Write(p []byte) (int, error) {
 	j.mu.Lock()
 	defer j.mu.Unlock()

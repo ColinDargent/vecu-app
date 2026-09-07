@@ -1,3 +1,53 @@
+{{/* `icone` : partage par l'ecran des skills et celui des cohortes. Il vivait
+     dans skills.html ; quand les cohortes ont pris leur propre page (DAR-196),
+     le choix etait de le recopier ou de le remonter ici. Recopier une
+     definition pour la voir diverger est la faute que ce lot passe sa journee a
+     corriger ailleurs. */}}
+{{/* Trois silhouettes franchement différentes : l'état se lit à la FORME, pas à
+     la couleur. Un daltonien, ou une capture en niveaux de gris, doit distinguer
+     les trois. D'où l'œil barré / l'œil / le crayon, et pas trois pastilles. */}}
+{{define "icone"}}
+{{- if eq . "invisible" -}}
+<svg class="icone" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
+  <path d="M1 8s2.5-4.5 7-4.5S15 8 15 8s-2.5 4.5-7 4.5S1 8 1 8z"/>
+  <circle cx="8" cy="8" r="1.9"/>
+  <path d="M2.5 13.5l11-11"/>
+</svg>
+{{- else if eq . "lecture" -}}
+<svg class="icone" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
+  <path d="M1 8s2.5-4.5 7-4.5S15 8 15 8s-2.5 4.5-7 4.5S1 8 1 8z"/>
+  <circle cx="8" cy="8" r="1.9"/>
+</svg>
+{{- else -}}
+<svg class="icone" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"
+     stroke-linejoin="round" aria-hidden="true">
+  <path d="M2 14l.9-3.4 7.3-7.3 2.5 2.5-7.3 7.3L2 14z"/>
+  <path d="M9.6 3.9l2.5 2.5"/>
+</svg>
+{{- end -}}
+{{end}}
+
+{{/* `resume` : les trois niveaux d'un partage, lus par niveau plutôt que par
+     compte. L'écran des skills et celui des cohortes rendent le MÊME panneau
+     sur deux objets différents, et le rendaient chacun avec sa copie du même
+     balisage. `icone`, juste au-dessus, avait échappé à cette copie ; celle-ci
+     avait été faite, et elle a divergé le jour où l'un des deux écrans a reçu
+     sa feuille de style et pas l'autre. Une seule définition, donc. */}}
+{{define "resume"}}
+<div class="resume">
+  {{range .}}
+  <span class="resume-niveau">
+    {{template "icone" .Valeur}}
+    <span class="quel">{{.Libelle}}</span>
+    <span class="qui">
+      {{- if .Comptes}}{{range $i, $c := .Comptes}}{{if $i}}, {{end}}{{$c}}{{end}}{{if .Reste}} <span class="discret">+{{.Reste}}</span>{{end}}
+      {{- else}}<span class="discret">personne</span>{{end -}}
+    </span>
+  </span>
+  {{end}}
+</div>
+{{end}}
+
 {{define "layout"}}<!DOCTYPE html>
 <html lang="fr">
 <head>
@@ -71,6 +121,32 @@
   .cases { margin-left: auto; display: flex; gap: .25rem; }
   .cases i { width: 15px; height: 13px; display: block; background: var(--surface); box-shadow: var(--relief); }
 
+  /* La taille de l'icone de niveau vit ICI, avec le gabarit qui la definit.
+     Elle vivait dans le <style> de `skills.html`, donc elle ne suivait pas le
+     gabarit : l'ecran des cohortes reutilise `resume-niveau` et `choix` sans
+     cette feuille, et un SVG sans width ni height retombe sur la taille par
+     defaut d'un element remplace - 300x150, mis a l'echelle du viewBox. D'ou
+     les icones geantes de l'ecran des cohortes, mesurees le 02/09.
+     Une page peut toujours la surcharger ; aucune n'a plus besoin de la
+     redeclarer pour que l'icone soit simplement bornee. */
+  svg.icone { width: .95rem; height: .95rem; flex: none; vertical-align: -.15em; }
+
+  /* Les règles internes sont REPLIÉES, et ce style vit ICI pour la même raison
+     que celui de l'icône juste au-dessus : il était scopé à `.membre` dans le
+     `<style>` de `dossiers.html`, donc la fiche d'un compte - qui affiche
+     exactement le même avertissement - retombait sur une forme plate, en rouge,
+     déroulée. Sur `shared`, ça faisait un mur de trente-cinq lignes.
+     Mesuré le 02/09, sur capture de Colin. */
+  details.internes { margin-top: .3rem; }
+  details.internes > summary { cursor: pointer; font-size: 11.5px; color: var(--alerte); }
+  .liste-internes {
+    list-style: none; margin: .3rem 0 0; padding: .3rem;
+    max-height: 9rem; overflow: auto;
+    border: 1px solid var(--trait-fin); background: var(--creux);
+  }
+  .liste-internes li { font-size: 11px; line-height: 1.55; }
+  details.internes p { margin: .3rem 0 0; font-size: 11.5px; color: var(--encre-douce); }
+
   /* ---- barre de menu ---------------------------------------------- */
   nav {
     display: flex; align-items: stretch; flex-wrap: wrap;
@@ -100,6 +176,23 @@
   code, .mono { font-family: var(--mono); }
   .erreur { color: var(--alerte); }
   .discret { color: var(--encre-douce); font-size: 12.5px; }
+
+  /* Le jeton en clair : encadré, parce qu'il n'apparaîtra qu'une fois et que
+     rien dans la page ne doit inviter à le survoler. */
+  .clair {
+    border: 1px solid var(--alerte); background: var(--creux);
+    padding: .6rem .8rem; margin: .8rem 0;
+  }
+  .clair h2 { margin-top: 0; color: var(--alerte); }
+  .clair pre {
+    font-family: var(--mono); font-size: 12px; background: var(--surface-2);
+    border: 1px solid var(--trait-fin); padding: .5rem;
+    white-space: pre-wrap; word-break: break-all; margin: .4rem 0;
+  }
+  /* Une ligne révoquée reste lisible mais cesse d'appeler l'oeil : elle sert
+     d'archive (« ce jeton a existé, coupé tel jour »), pas d'action. */
+  tr.revoque td { color: var(--encre-douce); text-decoration: line-through; }
+  tr.revoque td:last-child { text-decoration: none; }
   p { margin: .3rem 0 .9rem; }
 
   /* ---- tableaux ---------------------------------------------------- */
@@ -125,6 +218,11 @@
   }
   button:active:not(:disabled) { box-shadow: var(--enfonce); }
   button:disabled { cursor: default; }
+  /* REGLE 3 du contrat de latence : un geste deja parti ne repart pas.
+     `pointer-events: none` plutot que l'attribut `disabled` - voir le script en
+     bas de page pour la raison. La largeur est figee AVANT, regle 4 : un
+     controle qui retrecit sous le curseur en tire un autre sous le clic. */
+  button[aria-busy="true"] { pointer-events: none; opacity: .55; }
   /* Un lien qui a l'air d'un bouton. Reste un <a> : imbriquer un <button>
      dans un <a> n'est pas du HTML valide et casse la navigation au clavier. */
   a.btn {
@@ -146,6 +244,75 @@
     background: var(--creux); border: 1px solid var(--trait); box-shadow: var(--enfonce);
     font-family: var(--mono); font-size: 13px;
   }
+
+  /* ---- kit partagé ------------------------------------------------
+     TROISIÈME REMONTÉE, ET LA DERNIÈRE À FAIRE (04/09). `svg.icone` puis
+     `details.internes` sont montés ici parce qu'ils vivaient dans le `<style>`
+     d'un écran et que le voisin qui les réutilisait retombait sur du plat.
+     Le reste du lot avait la même maladie : `.resume`, `.reglage`,
+     `.grille-partage`, `.choix`, `.liste-skills`, `.large`, `.ok` et
+     `.form-tags` étaient déclarés dans `skills.html`, et l'écran des cohortes -
+     qui rend EXACTEMENT le même panneau de partage - n'en recevait aucun. Sa
+     colonne « membres » cassait au milieu d'un prénom, son « Enregistré. »
+     sortait en texte nu, et sa liste de cases n'avait ni cadre ni plafond de
+     hauteur. Mesuré au navigateur le 04/09. `dossiers.html` avait le même trou
+     sur `.ok` et `.form-tags`.
+
+     La règle qui sort de ces trois fois : une classe utilisée par DEUX écrans
+     vit ici. Un `<style>` de page ne garde que ce qui ne sert qu'à elle. */
+
+  /* Sur une fenêtre étroite, c'est le TABLEAU qui défile, pas la page : une
+     barre horizontale sous le document déplace aussi le titre et le menu. */
+  .large { overflow-x: auto; }
+
+  /* Le message d'un geste qui vient d'aboutir. Il se lit au TRAIT, pas à la
+     teinte : une bande à gauche reste visible en niveaux de gris. */
+  .ok {
+    margin: .3rem 0; padding: .25rem .5rem; font-size: 12.5px;
+    background: var(--surface-2); border-left: 3px solid var(--accent);
+  }
+
+  .form-tags { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap; margin: .4rem 0 .2rem; }
+  .form-tags label { display: flex; gap: .4rem; align-items: center; font-size: 12.5px; }
+
+  /* Le résumé du partage : ce qu'on lit sans déplier. L'icône porte le niveau,
+     donc il reste lisible en niveaux de gris, comme les boutons qu'il remplace.
+     La colonne cesse de grandir avec l'équipe : c'était tout l'objet du
+     changement, un résumé qui s'étale la reprendrait par la fenêtre. */
+  td.partage { max-width: 30rem; }
+  .resume { display: flex; flex-direction: column; gap: .15rem; font-size: 12.5px; }
+  .resume-niveau { display: flex; align-items: baseline; gap: .35rem; }
+  .resume-niveau svg { color: var(--encre-douce); }
+  /* Le libellé du niveau tient une COLONNE : les trois lignes s'alignent, donc
+     l'oeil descend « ouvert / lecture seule / privé » sans relire. En ligne
+     continue, la liste des comptes poussait le libellé suivant n'importe où. */
+  .resume-niveau .quel { flex: none; width: 7rem; color: var(--encre-douce); }
+  .resume-niveau .qui { min-width: 0; }
+
+  details.reglage { margin-top: .25rem; }
+  details.reglage > summary { cursor: pointer; font-size: 12.5px; color: var(--encre-douce); }
+  /* La grille de partage : un compte par ligne, un niveau par colonne. Les
+     libellés ne se coupent PAS (`nowrap`) - « lecture seule » cassé en deux
+     doublait la hauteur d'une ligne sur deux, et la grille cessait de se lire
+     en colonnes. Elle tient sa largeur toute seule ; c'est `td.partage` qui
+     borne la colonne, et `.large` qui fait défiler le tableau si besoin. */
+  .grille-partage { width: auto; margin: .35rem 0; border-collapse: collapse; }
+  .grille-partage th[scope="row"] {
+    text-align: left; font-weight: normal; padding-right: .8rem;
+    font-family: var(--mono); font-size: 12.5px; white-space: nowrap;
+  }
+  .grille-partage td { padding: .1rem .3rem; }
+  .choix { display: inline-flex; align-items: center; gap: .3rem; font-size: 12.5px; cursor: pointer; }
+  .grille-partage .choix { white-space: nowrap; }
+  .choix svg { color: var(--encre-douce); }
+
+  /* La composition d'un groupe : bornée en hauteur, elle défile plutôt que de
+     pousser le reste de la page hors de l'écran à trente skills. */
+  .liste-skills {
+    display: flex; flex-wrap: wrap; gap: .1rem .9rem;
+    max-height: 12rem; overflow: auto; margin: .3rem 0;
+    padding: .3rem; border: 1px solid var(--trait-fin); background: var(--creux);
+  }
 </style>
 </head>
 <body>
@@ -163,6 +330,9 @@
   <nav>
     <a href="/admin/"{{if eq .Page "dossiers"}} aria-current="page"{{end}}>Dossiers</a>
     <a href="/admin/skills"{{if eq .Page "skills"}} aria-current="page"{{end}}>Skills</a>
+    {{if .User.IsAdmin}}<a href="/admin/etat"{{if eq .Page "etat"}} aria-current="page"{{end}}>État des fichiers</a>{{end}}
+    {{if .User.IsAdmin}}<a href="/admin/cohortes"{{if eq .Page "cohortes"}} aria-current="page"{{end}}>Cohortes</a>{{end}}
+    <a href="/admin/jetons"{{if eq .Page "jetons"}} aria-current="page"{{end}}>Jetons MCP</a>
     {{if .User.IsAdmin}}<a href="/admin/users"{{if eq .Page "utilisateurs"}} aria-current="page"{{end}}>Utilisateurs</a>{{end}}
     <span class="compte">
       <span>{{.User.Username}}</span>
@@ -172,5 +342,36 @@
 {{end}}
   <main>{{template "content" .}}</main>
 </div>
+<script>
+// REGLE 3 DU CONTRAT DE LATENCE (DAR-195) : desactiver au PREMIER CLIC, pas au
+// premier indicateur. Le plancher reseau depuis la Coree est de 243 ms de
+// mediane ; un mainteneur qui ne voit rien bouger reclique, et le second POST
+// part. Aucune occurrence constatee, mais le cas est realiste et il porte sur
+// des droits.
+//
+// POURQUOI PAS L'ATTRIBUT `disabled`. Un controle desactive est retire du jeu
+// de donnees du formulaire, et `dossiers.html` porte un bouton NOMME
+// (`name="retirer"`) dont la valeur decide du geste : le desactiver trop tot le
+// changerait en silence. L'ordre exact entre le gestionnaire de `submit` et la
+// construction du jeu de donnees n'a pas pu etre confirme sur la doc (ni la
+// page MDN de l'evenement, ni la section citee du standard ne la donnent), donc
+// on ne s'appuie PAS dessus : le garde est un drapeau, le rendu est une classe,
+// et rien ne touche a la serialisation.
+//
+// Sans JavaScript, tout continue de fonctionner : c'est le double envoi qui
+// redevient possible, pas le geste qui disparait.
+(function () {
+  document.addEventListener('submit', function (e) {
+    var f = e.target;
+    if (!(f instanceof HTMLFormElement)) return;
+    if (f.dataset.envoye === '1') { e.preventDefault(); return; }
+    f.dataset.envoye = '1';
+    var b = f.querySelector('button:not([type="button"])');
+    if (!b) return;
+    b.style.minWidth = b.offsetWidth + 'px';
+    b.setAttribute('aria-busy', 'true');
+  }, true);
+})();
+</script>
 </body>
 </html>{{end}}

@@ -147,6 +147,9 @@ func TestDeuxRacinesNePeuventPasSyncherLeMemeEspace(t *testing.T) {
 	// Les fichiers de verrou vivent dans le dossier d'application : sans HOME
 	// isolé, ce test en sème dans celui de la machine.
 	t.Setenv("HOME", t.TempDir())
+	// os.UserHomeDir lit %USERPROFILE% sur Windows et non HOME : sans cette
+	// ligne, le test lisait le VRAI dossier personnel. Mesuré en CI le 06/09.
+	t.Setenv("USERPROFILE", t.TempDir())
 	partage := t.TempDir() // le dossier convoité, hors des deux racines
 	racineA, racineB := t.TempDir(), t.TempDir()
 	for _, d := range []string{racineA, racineB} {
@@ -190,6 +193,9 @@ func TestPrisePartielleNeLaissePasDeVerrouOrphelin(t *testing.T) {
 	// Les fichiers de verrou vivent dans le dossier d'application : sans HOME
 	// isolé, ce test en sème dans celui de la machine.
 	t.Setenv("HOME", t.TempDir())
+	// os.UserHomeDir lit %USERPROFILE% sur Windows et non HOME : sans cette
+	// ligne, le test lisait le VRAI dossier personnel. Mesuré en CI le 06/09.
+	t.Setenv("USERPROFILE", t.TempDir())
 	partage := t.TempDir()
 	racineA, racineB := t.TempDir(), t.TempDir()
 	for _, d := range []string{racineA, racineB} {
@@ -232,6 +238,9 @@ func TestUnMontageDansLaRacineNeSeVerrouillePasDeuxFois(t *testing.T) {
 	// Les fichiers de verrou vivent dans le dossier d'application : sans HOME
 	// isolé, ce test en sème dans celui de la machine.
 	t.Setenv("HOME", t.TempDir())
+	// os.UserHomeDir lit %USERPROFILE% sur Windows et non HOME : sans cette
+	// ligne, le test lisait le VRAI dossier personnel. Mesuré en CI le 06/09.
+	t.Setenv("USERPROFILE", t.TempDir())
 	racine := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(racine, vecuDir), 0o700); err != nil {
 		t.Fatal(err)

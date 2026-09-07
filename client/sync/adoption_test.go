@@ -3,6 +3,7 @@ package sync
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -425,6 +426,18 @@ func TestCopieVerifieeNeDetruitPasUneDestinationExistante(t *testing.T) {
 // TestCopieVerifieeEchoueeLaisseLaSourceIntacte : l'invariant central du fichier,
 // testé sur la branche qui compte (la copie qui rate en cours de route).
 func TestCopieVerifieeEchoueeLaisseLaSourceIntacte(t *testing.T) {
+	// Ce test rend une opération impossible en retirant un bit de permission
+	// Unix. Windows ne les porte pas : `os.Chmod` n'y touche que le drapeau
+	// lecture seule, la précondition ne peut donc pas être créée et le test
+	// vérifierait le contraire de ce qu'il annonce.
+	//
+	// Ce que ça laisse découvert, et il faut le dire : le chemin d'ERREUR de
+	// `copieVerifiee` / `adopte` n'est pas exercé sur Windows. À couvrir
+	// autrement le jour où on saura rendre une copie impossible là-bas
+	// (fichier ouvert en exclusif, ACL) - c'est écrit dans spec-port-windows.md.
+	if runtime.GOOS == "windows" {
+		t.Skip("précondition = bit de permission Unix, inexistant sur Windows")
+	}
 	dir := poseRacine(t)
 	source := poseSkill(t, dir, "src", "s")
 	if os.Geteuid() == 0 {
@@ -570,6 +583,18 @@ func TestCandidatsCasseDuSkillMd(t *testing.T) {
 // là - et la projection refusera de l'écraser à chaque cycle. Donc : pas de
 // tentative de lien, et un message qui appelle une action humaine.
 func TestAdopteSourceNonSupprimable(t *testing.T) {
+	// Ce test rend une opération impossible en retirant un bit de permission
+	// Unix. Windows ne les porte pas : `os.Chmod` n'y touche que le drapeau
+	// lecture seule, la précondition ne peut donc pas être créée et le test
+	// vérifierait le contraire de ce qu'il annonce.
+	//
+	// Ce que ça laisse découvert, et il faut le dire : le chemin d'ERREUR de
+	// `copieVerifiee` / `adopte` n'est pas exercé sur Windows. À couvrir
+	// autrement le jour où on saura rendre une copie impossible là-bas
+	// (fichier ouvert en exclusif, ACL) - c'est écrit dans spec-port-windows.md.
+	if runtime.GOOS == "windows" {
+		t.Skip("précondition = bit de permission Unix, inexistant sur Windows")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root ignore les droits du dossier parent")
 	}
@@ -995,6 +1020,11 @@ func TestAdoptionManuelleRefuseUnCheminQuiPasseParUnLien(t *testing.T) {
 	dir := poseRacine(t)
 	maison := maisonDeTest(t)
 	t.Setenv("HOME", maison)
+	// os.UserHomeDir lit %USERPROFILE% sur Windows et non HOME : sans cette
+	// ligne, le test lisait le VRAI dossier personnel. Mesuré en CI le 06/09.
+	t.Setenv("USERPROFILE", maison)
+	t.Setenv("AppData", filepath.Join(maison, "AppData", "Roaming"))
+	t.Setenv("LocalAppData", filepath.Join(maison, "AppData", "Local"))
 	dotfiles := filepath.Join(maison, "dotfiles", "claude")
 	source := poseSkill(t, dotfiles, "skills", "perso")
 	if err := os.Symlink(dotfiles, filepath.Join(maison, ".claude")); err != nil {
@@ -1027,6 +1057,11 @@ func TestCandidatsPersonnels(t *testing.T) {
 	dir := poseRacine(t)
 	maison := maisonDeTest(t)
 	t.Setenv("HOME", maison)
+	// os.UserHomeDir lit %USERPROFILE% sur Windows et non HOME : sans cette
+	// ligne, le test lisait le VRAI dossier personnel. Mesuré en CI le 06/09.
+	t.Setenv("USERPROFILE", maison)
+	t.Setenv("AppData", filepath.Join(maison, "AppData", "Roaming"))
+	t.Setenv("LocalAppData", filepath.Join(maison, "AppData", "Local"))
 	poseSkill(t, maison, ".claude/skills", "perso")
 	poseSkill(t, maison, ".claude/skills", "verrouille")
 	lock := `{"skills":{"verrouille":{"source":"x/y"}}}`
@@ -1118,6 +1153,14 @@ func TestEngineAdopteRacineRelative(t *testing.T) {
 // « non adoptés », avec un pied de page affirmant qu'il n'a pas bougé. Et la
 // consigne doit survivre au cycle suivant.
 func TestEngineAdopteAvertissementVoyageAvecLAdoption(t *testing.T) {
+	// Précondition : un dossier parent en lecture seule (0555) pour faire échouer
+	// la pose du lien et vérifier que l'avertissement voyage avec l'adoption.
+	// Windows ne porte pas ce bit - le lien se pose, il n'y a pas d'avertissement,
+	// et le test vérifierait le contraire de ce qu'il annonce. Même raison que le
+	// saut « root » ci-dessus, autre système.
+	if runtime.GOOS == "windows" {
+		t.Skip("précondition = dossier parent en lecture seule Unix, sans effet sur Windows")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root ignore les droits du dossier parent")
 	}
@@ -1249,6 +1292,9 @@ func TestRefusDuCheminSansHome(t *testing.T) {
 	dir := poseRacine(t)
 	maison := maisonDeTest(t)
 	t.Setenv("HOME", "")
+	// os.UserHomeDir lit %USERPROFILE% sur Windows et non HOME : sans cette
+	// ligne, le test lisait le VRAI dossier personnel. Mesuré en CI le 06/09.
+	t.Setenv("USERPROFILE", "")
 	dotfiles := filepath.Join(maison, "dotfiles", "claude")
 	source := poseSkill(t, dotfiles, "skills", "perso")
 	if err := os.Symlink(dotfiles, filepath.Join(maison, ".claude")); err != nil {
@@ -1270,7 +1316,10 @@ func TestRefusDuCheminSansHome(t *testing.T) {
 func TestRefusDuCheminHorsDossierPersonnel(t *testing.T) {
 	dir := poseRacine(t)
 	ailleurs := maisonDeTest(t)
-	t.Setenv("HOME", maisonDeTest(t)) // un home valide, mais qui ne contient pas la source
+	t.Setenv("HOME", maisonDeTest(t))
+	// os.UserHomeDir lit %USERPROFILE% sur Windows et non HOME : sans cette
+	// ligne, le test lisait le VRAI dossier personnel. Mesuré en CI le 06/09.
+	t.Setenv("USERPROFILE", maisonDeTest(t)) // un home valide, mais qui ne contient pas la source
 	depot := filepath.Join(ailleurs, "depot-equipe", "claude")
 	source := poseSkill(t, depot, "skills", "perso")
 	if err := os.Symlink(depot, filepath.Join(ailleurs, "claude-lien")); err != nil {

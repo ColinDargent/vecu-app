@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -85,6 +86,25 @@ func dossierPresent(dir, rel string) (bool, error) {
 	}
 }
 
+// memeCible : deux cibles de lien symbolique désignent-elles le même endroit ?
+//
+// Comparaison NORMALISÉE, et ce n'est pas de la coquetterie. Windows réécrit la
+// cible d'un lien en antislashs AU MOMENT DE LA CRÉATION, quel que soit le
+// texte qu'on lui passe : `os.Symlink("../../shared/skills/x", …)` se relit
+// « ..\..\shared\skills\x ». Une comparaison d'octets déclarerait donc
+// « étranger » un lien que Vécu vient lui-même de poser.
+//
+// Ce que ça coûterait sans la normalisation, et pourquoi ça compte ici plus
+// qu'ailleurs : c'est cette comparaison qui décide « lien à nous » contre
+// « lien géré par un autre outil, à ne pas toucher ». Le même dossier se
+// synchronise entre un Mac et un PC ; chacun aurait boudé les liens de l'autre,
+// en silence, en les signalant comme étrangers.
+//
+// `Clean` tolère un slash final ou un « ./ » ; `ToSlash` gomme le séparateur.
+func memeCible(lu, attendu string) bool {
+	return filepath.ToSlash(filepath.Clean(lu)) == filepath.ToSlash(filepath.Clean(attendu))
+}
+
 // cibleSymlink : la cible RELATIVE du lien `<skillsRel>/<slug>`. Relative pour
 // survivre à un déplacement de la racine. Le nombre de « .. » se dérive des
 // segments de `skillsRel` (`.claude/skills/<slug>` est à deux niveaux sous la
@@ -95,7 +115,21 @@ func cibleSymlink(skillsRel, slug string) string {
 	for range strings.Split(skillsRel, "/") {
 		remonte = append(remonte, "..")
 	}
-	return filepath.Join(append(remonte, skillsEspace, slug)...)
+	// `path.Join` et NON `filepath.Join` : la cible garde des barres obliques sur
+	// tous les systèmes.
+	//
+	// Mesuré en CI le 06/09 sur un runner Windows : `filepath.Join` y produisait
+	// « ..\..\shared\skills\<slug> », donc une cible DIFFÉRENTE de celle
+	// qu'un Mac écrit pour le même skill. Or c'est cette chaîne exacte qui
+	// distingue « un lien que Vécu a posé » de « un lien étranger, à ne pas
+	// toucher » - et le même dossier se synchronise entre un Mac et un PC. Un
+	// poste Windows aurait donc pris pour étrangers tous les liens venus d'un
+	// Mac, et réciproquement : chacun aurait refusé de projeter ce que l'autre
+	// avait posé, en silence.
+	//
+	// Windows accepte la barre oblique comme séparateur, y compris dans la cible
+	// d'un lien. Le choix est donc gratuit d'un côté et nécessaire de l'autre.
+	return path.Join(append(remonte, skillsEspace, slug)...)
 }
 
 // detecteClaude : Claude Code est-il utilisé sur ce poste ? Signal suffisant
@@ -326,7 +360,7 @@ func projeteCible(dir, skillsRel string, desired, previous []string) (projetes [
 			// Un lien existe déjà : l'adopter s'il pointe au bon endroit (Clean pour
 			// tolérer un slash final ou un « ./ »), sinon c'est un lien étranger (vers
 			// un autre store, un autre outil) qu'on ne touche pas.
-			if dest, _ := os.Readlink(lien); filepath.Clean(dest) == cible {
+			if dest, _ := os.Readlink(lien); memeCible(dest, cible) {
 				gere[slug] = true // adoption d'un lien déjà correct
 			} else {
 				laisses = append(laisses, laisseProjection(slug, skillsRel+"/"+slug+" est un lien géré ailleurs (non créé par Vécu) : skill non projeté, lien laissé intact"))
@@ -349,7 +383,7 @@ func projeteCible(dir, skillsRel string, desired, previous []string) (projetes [
 		if err != nil || info.Mode()&os.ModeSymlink == 0 {
 			continue // déjà parti, ou remplacé par un vrai fichier/dossier : ne pas toucher
 		}
-		if dest, _ := os.Readlink(lien); filepath.Clean(dest) != cibleSymlink(skillsRel, slug) {
+		if dest, _ := os.Readlink(lien); !memeCible(dest, cibleSymlink(skillsRel, slug)) {
 			continue // devenu un lien étranger : ne pas toucher
 		}
 		// TOCTOU accepté : entre ce Readlink et le Remove, un tiers pourrait

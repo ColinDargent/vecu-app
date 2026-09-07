@@ -31,7 +31,12 @@ func TestLEtatResteOuIlEstTantQuOnNeMigrePas(t *testing.T) {
 // un geste, et elle laisse de quoi revenir en arrière.
 func TestMigrationExpliciteEtReversible(t *testing.T) {
 	maison := t.TempDir()
-	t.Setenv("HOME", maison) // pour ne pas écrire dans le vrai dossier d'application
+	t.Setenv("HOME", maison)
+	// os.UserHomeDir lit %USERPROFILE% sur Windows et non HOME : sans cette
+	// ligne, le test lisait le VRAI dossier personnel. Mesuré en CI le 06/09.
+	t.Setenv("USERPROFILE", maison)
+	t.Setenv("AppData", filepath.Join(maison, "AppData", "Roaming"))
+	t.Setenv("LocalAppData", filepath.Join(maison, "AppData", "Local")) // pour ne pas écrire dans le vrai dossier d'application
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, vecuDir), 0o700); err != nil {
 		t.Fatal(err)
@@ -50,8 +55,13 @@ func TestMigrationExpliciteEtReversible(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if filepath.Dir(filepath.Dir(cible)) != filepath.Join(maison, "Library", "Application Support", "Vecu") {
-		t.Errorf("cible inattendue : %q", cible)
+	// Attendu DÉRIVÉ de `DossierApplication`, pas écrit en dur : ce chemin est
+	// « ~/Library/Application Support/Vecu » sur macOS et « %AppData%\Vecu » sur
+	// Windows, et un test qui grave la forme macOS ne teste plus la migration -
+	// il teste sur quel système il tourne. L'égalité littérale qui verrouille la
+	// forme macOS existe, et c'est sa place : chemins_app_darwin_test.go.
+	if filepath.Dir(filepath.Dir(cible)) != DossierApplication() {
+		t.Errorf("cible inattendue : %q, attendu sous %q", cible, DossierApplication())
 	}
 
 	// Le contenu a suivi, à l'identique.
@@ -97,6 +107,9 @@ func TestMigrationExpliciteEtReversible(t *testing.T) {
 // de perte que le verrou existe pour empêcher.
 func TestDeuxRacinesGardentDeuxEtats(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	// os.UserHomeDir lit %USERPROFILE% sur Windows et non HOME : sans cette
+	// ligne, le test lisait le VRAI dossier personnel. Mesuré en CI le 06/09.
+	t.Setenv("USERPROFILE", t.TempDir())
 	a, b := t.TempDir(), t.TempDir()
 	for _, d := range []string{a, b} {
 		if err := os.MkdirAll(filepath.Join(d, vecuDir), 0o700); err != nil {
@@ -127,6 +140,9 @@ func TestDeuxRacinesGardentDeuxEtats(t *testing.T) {
 // et le poste écrirait indéfiniment là où on vient de décider qu'il n'écrit plus.
 func TestMigrationDUnPosteNeuf(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	// os.UserHomeDir lit %USERPROFILE% sur Windows et non HOME : sans cette
+	// ligne, le test lisait le VRAI dossier personnel. Mesuré en CI le 06/09.
+	t.Setenv("USERPROFILE", t.TempDir())
 	dir := t.TempDir()
 	cible, err := MigreEtatVersDossierApplication(dir)
 	if err != nil {

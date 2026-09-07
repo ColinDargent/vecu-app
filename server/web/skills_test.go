@@ -426,7 +426,7 @@ func TestPanneauDePartage(t *testing.T) {
 		t.Error("le formulaire de partage a disparu : le geste ne marcherait plus sans script")
 	}
 	// Le niveau est nommé à côté du radio : le geste ne dépend pas de l'icône.
-	if !strings.Contains(body, "<span>écriture</span>") {
+	if !strings.Contains(body, "<span>ouvert</span>") {
 		t.Error("les niveaux n'ont pas de libellé lisible")
 	}
 }

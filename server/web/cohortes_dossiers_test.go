@@ -29,14 +29,19 @@ func TestPanneauCohortesSurUnDossier(t *testing.T) {
 	if !strings.Contains(page, "Cohortes") {
 		t.Fatal("le panneau des cohortes n'est pas rendu sur un dossier")
 	}
-	if !strings.Contains(page, `name="groupe_id"`) {
-		t.Fatal("aucune case de cohorte rendue")
+	// 02/09 : la page du dossier LIT ses cohortes, elle ne les range plus. Le
+	// geste a déménagé sur la cohorte, qui est l'objet dont on part.
+	if strings.Contains(page, `action="/admin/dossiers/cohortes"`) {
+		t.Fatal("la page du dossier range encore des cohortes : deuxième surface autoritaire")
 	}
 
-	if rec := postForm(h, "/admin/dossiers/cohortes", url.Values{
-		"chemin": {"clients"}, "groupe_id": {strconv.FormatInt(salaries, 10)},
+	if rec := postForm(h, "/admin/cohortes/modifier", url.Values{
+		"groupe_id":      {strconv.FormatInt(salaries, 10)},
+		"nom":            {"Salariés"},
+		"noeud":          {"clients"},
+		"niveau_clients": {""},
 	}, c); rec.Code != http.StatusSeeOther {
-		t.Fatalf("rangement du dossier : attendu 303, obtenu %d", rec.Code)
+		t.Fatalf("rangement du dossier depuis la cohorte : attendu 303, obtenu %d", rec.Code)
 	}
 
 	u, _ := s.DB.UserByID(caroline.ID)
@@ -45,8 +50,12 @@ func TestPanneauCohortesSurUnDossier(t *testing.T) {
 	}
 
 	// Décocher referme, sans laisser de règle orpheline dans `permissions`.
-	if rec := postForm(h, "/admin/dossiers/cohortes", url.Values{
-		"chemin": {"clients"},
+	// Le formulaire de la cohorte sans aucun `dossier` = plus aucun espace.
+	if rec := postForm(h, "/admin/cohortes/modifier", url.Values{
+		"groupe_id":      {strconv.FormatInt(salaries, 10)},
+		"nom":            {"Salariés"},
+		"noeud":          {"clients"},
+		"niveau_clients": {"hors"},
 	}, c); rec.Code != http.StatusSeeOther {
 		t.Fatalf("retrait : attendu 303, obtenu %d", rec.Code)
 	}
@@ -85,9 +94,12 @@ func TestCohortesDossierReserveAuxAdmins(t *testing.T) {
 	}
 }
 
-// TestUneSeuleSurfaceAutoritaire : la vue d'un groupe LISTE ses dossiers, elle
-// ne les règle pas. Deux écrans qui font tous les deux foi s'écrasent l'un
-// l'autre dès que l'un est resté ouvert pendant que l'autre enregistrait.
+// TestUneSeuleSurfaceAutoritaire : UNE SEULE surface range un dossier dans une
+// cohorte. Deux écrans qui font tous les deux foi s'écrasent l'un l'autre dès
+// que l'un est resté ouvert pendant que l'autre enregistrait.
+//
+// 02/09 : cette surface est la COHORTE, plus la page du dossier. L'invariant
+// est le même ; c'est le côté qui écrit qui a changé, sur retour de Colin.
 func TestUneSeuleSurfaceAutoritaire(t *testing.T) {
 	s := newServer(t)
 	s.DB.CreateUser("colin", "mdp", perms.Ecriture, true)
@@ -98,16 +110,60 @@ func TestUneSeuleSurfaceAutoritaire(t *testing.T) {
 	h := s.Handler()
 	c := login(t, h, "colin", "mdp")
 
-	page := get(h, "/admin/skills", c).Body.String()
-	if !strings.Contains(page, "Dossiers portés par cette cohorte") {
-		t.Error("la vue du groupe ne liste pas ses dossiers")
-	}
+	page := get(h, "/admin/cohortes", c).Body.String()
 	if !strings.Contains(page, `href="/admin/dossiers/clients"`) {
-		t.Error("le dossier listé ne renvoie pas vers sa page, seul endroit où il se règle")
+		t.Error("le dossier porté par la cohorte ne renvoie pas vers sa page")
 	}
-	// Le panneau de composition du groupe ne propose QUE des skills.
-	if strings.Contains(page, `name="chemin" value="clients"`) {
-		t.Error("la vue du groupe propose de régler un dossier : deuxième surface autoritaire")
+	// L'INVARIANT NE BOUGE PAS, LE CÔTÉ QUI ÉCRIT A DÉMÉNAGÉ (02/09, retour de
+	// Colin). Une seule surface range un dossier dans une cohorte, sans quoi
+	// deux écrans laissés ouverts s'écrasent l'un l'autre. Cette surface est
+	// désormais la COHORTE : on part de « l'équipe contenu, voilà ses
+	// dossiers », pas de chaque dossier pour se demander qui y entre.
+	//
+	// CE QU'ON VÉRIFIE ICI A CHANGÉ LE 04/09, et il fallait le changer. La
+	// ligne d'avant cherchait `name="dossier"` - les cases à cocher du panneau.
+	// Or RIEN NE LES LISAIT : `handleModifierGroupe` ne regarde que `noeud` et
+	// `niveau_<chemin>`, et décocher `clients` puis enregistrer laissait
+	// `clients` dans la cohorte (constaté au navigateur). L'assertion tenait
+	// donc sur une commande morte : elle ne pouvait pas tomber, et elle aurait
+	// laissé retirer la vraie surface sans rien dire. C'est l'arbre qu'on
+	// vérifie, parce que c'est lui qui écrit.
+	if !strings.Contains(page, `name="noeud"`) {
+		t.Error("l'écran des cohortes ne compose pas ses dossiers : le geste n'a nulle part où se faire")
+	}
+	if !strings.Contains(page, `name="niveau_clients"`) {
+		t.Error("le dossier porté n'a pas de réglage de niveau dans l'arbre de sa cohorte")
+	}
+	// UN CHEMIN, UN SEUL ENDROIT (04/09). `clients` est dans l'arbre, donc il
+	// ne doit PAS reparaître dans « autres chemins » : la page d'avant le
+	// montrait quatre fois, sous quatre vocabulaires, dont deux inertes.
+	if n := strings.Count(page, `name="niveau_clients"`); n != 1 {
+		t.Errorf("`clients` est réglable à %d endroits de la page, attendu 1", n)
+	}
+	if strings.Contains(page, `id="niv-`+strconv.FormatInt(g, 10)+`-clients"`) {
+		t.Error("`clients` est dans l'arbre ET dans les autres chemins : deux surfaces pour un dossier")
+	}
+	// Ce qu'il regle, c'est le NIVEAU que la cohorte accorde sur un dossier
+	// qu'elle porte deja. Ce reglage n'a de sens que rapporte a la cohorte,
+	// donc il vit ici et pas sur la page du dossier.
+	if !strings.Contains(page, `action="/admin/cohortes/niveau-chemin"`) {
+		t.Error("l'écran des cohortes ne permet pas de régler le niveau d'un dossier qu'il porte")
+	}
+
+	// UN CHEMIN PLUS PROFOND QUE L'ARBRE. Il n'y a pas de ligne d'arbre pour
+	// lui - l'arbre s'arrête à deux niveaux - donc c'est « autres chemins » qui
+	// doit porter et son réglage et son retrait. Sans ce retrait, un
+	// sous-dossier rangé dans une cohorte y serait piégé.
+	s.DB.RangeChemin(g, "clients/acme/prive", "dossier", "")
+	page = get(h, "/admin/cohortes", c).Body.String()
+	if !strings.Contains(page, `action="/admin/cohortes/retirer-chemin"`) {
+		t.Error("aucun retrait par chemin : un sous-dossier rangé dans une cohorte y serait piégé")
+	}
+	if !strings.Contains(page, `id="niv-`+strconv.FormatInt(g, 10)+`-clients/acme/prive"`) {
+		t.Error("le chemin profond n'a pas de réglage de niveau : il est entré sans pouvoir être réglé")
+	}
+	if strings.Contains(page, `name="niveau_clients/acme/prive"`) {
+		t.Error("le chemin profond apparaît dans l'arbre, qui ne le couvre pas")
 	}
 }
 
@@ -173,22 +229,28 @@ func TestFermerUnDossierNeFermePasSonAuteur(t *testing.T) {
 	if rec.Code != http.StatusSeeOther {
 		t.Fatalf("attendu 303, obtenu %d", rec.Code)
 	}
-	if loc := rec.Header().Get("Location"); !strings.Contains(loc, "okd=1") {
-		t.Errorf("le déverrouillage n'est pas signalé à l'écran : %q", loc)
+	// PLUS D'EXCEPTION POSEE, et plus de deverrouillage a annoncer (DAR-196,
+	// 01/09). Le garde rendait a l'auteur son niveau d'AVANT, donc l'ecriture,
+	// sur un dossier qu'il venait de declarer invisible : il preservait
+	// l'administrabilite en lui rendant la LECTURE des fichiers, ce qu'aucune
+	// des cinq autres portes ne faisait. L'administrabilite est desormais portee
+	// par la vue, pour les six portes et sans rendre aucun droit.
+	if loc := rec.Header().Get("Location"); strings.Contains(loc, "okd=1") {
+		t.Errorf("un deverrouillage est encore annonce alors que le garde a ete retire : %q", loc)
 	}
 
-	// L'auteur voit encore, au niveau qu'il avait.
+	// L'auteur est bien ferme, comme tout le monde : le geste dit ce qu'il fait.
 	u, _ := s.DB.UserByID(colin.ID)
-	if niveau, _ := s.DB.Effective(u, "rh/salaires.md"); niveau != perms.Ecriture {
-		t.Errorf("l'auteur du geste s'est enfermé dehors : %v", niveau)
+	if niveau, _ := s.DB.Effective(u, "rh/salaires.md"); niveau != perms.Invisible {
+		t.Errorf("le defaut du dossier devait fermer aussi son auteur, obtenu %v", niveau)
 	}
-	// Il peut toujours atteindre la page.
+	// Mais il ADMINISTRE toujours le dossier : c'est le critere de DAR-196.
 	if code := get(h, "/admin/dossiers/rh", c).Code; code != http.StatusOK {
 		t.Errorf("la page du dossier est devenue inatteignable : %d", code)
 	}
-	// Et l'écran le dit.
-	if page := get(h, "/admin/dossiers/rh?okd=1", c).Body.String(); !strings.Contains(page, "une exception a été posée") {
-		t.Error("l'exception est posée sans être annoncée : l'auteur croit que sa règle vaut pour lui")
+	// Et il n'en LIT plus le contenu : administrer n'est pas lire.
+	if code := get(h, "/admin/dossiers/rh/salaires.md", c).Code; code != http.StatusNotFound {
+		t.Errorf("le contenu du fichier ferme reste servi a son auteur : %d", code)
 	}
 
 	// PERSONNE D'AUTRE n'a gagné de règle. Prouvé sans lire la base : le dossier

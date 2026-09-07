@@ -1,21 +1,46 @@
 {{define "title"}}Utilisateurs{{end}}
 {{define "content"}}
+<style>
+  /* Le formulaire de création : ses champs s'empilaient sur toute la largeur
+     de la page, donc un « Nom d'utilisateur » de 20 caractères ouvrait un
+     champ de 1200 pixels. Ils sont bornés, et la fiche se lit en une colonne. */
+  .creation-compte { max-width: 34rem; }
+  .creation-compte input[type="text"], .creation-compte input:not([type]),
+  .creation-compte input[type="password"], .creation-compte select { width: 100%; }
+  .creation-compte fieldset { border: 1px solid var(--trait-fin); margin: 1rem 0; padding: .5rem .7rem .7rem; }
+  .creation-compte legend { font-size: 11px; text-transform: uppercase; letter-spacing: .09em; font-weight: 700; }
+  .sous-titre { margin: .6rem 0 .1rem; font-weight: 700; }
+</style>
 <h1>Utilisateurs</h1>
 {{if .Erreur}}<p class="erreur">{{.Erreur}}</p>{{end}}
 <table>
-  <tr><th>Nom</th><th>Niveau par défaut</th><th>Rôle</th><th></th></tr>
+  <tr><th>Nom</th><th>Niveau par défaut</th><th>Rôle</th><th></th><th></th></tr>
   {{range .Users}}
   <tr>
     <td>{{.Username}}</td>
     <td>{{.Niveau}}</td>
     <td>{{if .IsAdmin}}administrateur{{else}}membre{{end}}</td>
     <td><a href="/admin/users/{{.ID}}">Gérer les droits</a></td>
+    <td>
+      {{if .Fermable}}
+        <span class="discret" title="{{.Fermable}}">fermeture impossible</span>
+      {{else}}
+      <form method="post" action="/admin/users/{{.ID}}/fermer"
+            onsubmit="return confirm('Fermer le compte {{.Username}} ?\n\nSes droits, ses jetons et ses postes partent avec lui. Les fichiers restent : le dépôt garde le contenu et l\'auteur de chaque version.')">
+        <input name="confirmation" placeholder="{{.Username}}" size="12" required
+               aria-label="Retaper le nom du compte pour confirmer">
+        <button>Fermer</button>
+      </form>
+      {{end}}
+    </td>
   </tr>
   {{end}}
 </table>
+<p class="discret">Fermer un compte retire ses accès. Ça n'efface aucun fichier :
+le dépôt garde le contenu et l'auteur de chaque version.</p>
 
 <h2>Créer un compte</h2>
-<form method="post" action="/admin/users">
+<form method="post" action="/admin/users" class="creation-compte">
   <p><label>Nom d'utilisateur<br><input name="username" required></label></p>
   <p><label>Mot de passe<br><input name="password" type="password" autocomplete="new-password" required></label></p>
   <p><label>Niveau par défaut (racine)<br>
@@ -23,6 +48,38 @@
       {{range .Niveaux}}<option value="{{.Valeur}}">{{.Libelle}}</option>{{end}}
     </select></label></p>
   <p><label><input type="checkbox" name="admin"> Administrateur</label></p>
+  {{/* LES COHORTES À LA CRÉATION (02/09, retour de Colin). Le geste courant à
+       l'arrivée de quelqu'un est de le mettre dans une cohorte, pas de lui
+       poser ses dossiers un par un depuis sa fiche. */}}
+  {{if .Cohortes}}
+  <fieldset>
+    <legend>Cohortes</legend>
+    <p class="discret">Le compte hérite des dossiers et des skills de chaque cohorte cochée.
+    C'est ici qu'on donne des droits ; sa fiche ne sert qu'aux cas particuliers.</p>
+    {{if .CohortesDossiers}}
+    <p class="discret sous-titre">Cohortes de dossiers</p>
+    <div class="liste-skills">
+      {{range .CohortesDossiers}}
+      <label class="choix"><input type="checkbox" name="cohorte_id" value="{{.ID}}"> {{.Nom}}</label>
+      {{end}}
+    </div>
+    {{end}}
+    {{if .CohortesSkills}}
+    <p class="discret sous-titre">Cohortes de skills</p>
+    <div class="liste-skills">
+      {{range .CohortesSkills}}
+      <label class="choix"><input type="checkbox" name="cohorte_id" value="{{.ID}}"> {{.Nom}}</label>
+      {{end}}
+    </div>
+    {{end}}
+    <p><label>Niveau dans ces cohortes<br>
+      <select name="niveau_cohorte">
+        {{range .Niveaux}}<option value="{{.Valeur}}"{{if eq .Valeur "lecture"}} selected{{end}}>{{.Libelle}}</option>{{end}}
+      </select></label>
+      <span class="discret">C'est un plafond : une cohorte ne donnera jamais plus que ça.
+      Distinct du niveau par défaut ci-dessus, sans quoi un compte privé n'hériterait de rien.</span></p>
+  </fieldset>
+  {{end}}
   <p><button>Créer</button></p>
 </form>
 {{end}}

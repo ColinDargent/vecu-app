@@ -1,0 +1,116 @@
+{{define "title"}}État des fichiers{{end}}
+{{define "content"}}
+<h1>Où en est chaque fichier</h1>
+
+{{/* CE QUE CET ÉCRAN RÉPOND, en une phrase. Sans elle, on lit une matrice de
+     fichiers et de postes sans savoir quelle question elle tranche - et une
+     matrice qu'on ne sait pas lire se lit comme une panne. */}}
+<p class="discret">Une seule question : <strong>est-ce que ce fichier est bien arrivé chez tout le
+monde ?</strong> Une colonne par poste, une ligne par fichier. « On ne sait pas » n'est jamais
+« non » : c'est l'absence de nouvelles, et elle se distingue partout dans ce tableau.</p>
+
+{{if .AucunNeParle}}
+{{/* L'ÉTAT OÙ LE TABLEAU NE PEUT RIEN DIRE, et il a une cause nommable. Le
+     dire vaut mieux que laisser lire une grille de « sans nouvelles » comme un
+     système cassé - c'est le retour de Colin le 02/09. */}}
+<p class="avertissement">
+  <strong>Aucun poste ne rapporte encore son état, donc ce tableau ne peut rien affirmer.</strong>
+  Le canal de remontée est arrivé sur le serveur le 01/09 ; un poste ne s'en sert qu'à partir de
+  la version du client qui sait l'utiliser. Tant qu'aucune release n'est passée sur les machines,
+  toutes les colonnes disent « sans nouvelles », et c'est le comportement voulu : le silence se lit
+  comme du silence, jamais comme du vert.
+</p>
+{{else if .Muets}}
+{{/* EN TETE, ET PAS EN NOTE DE BAS DE PAGE. Un tableau constellé de « sans
+     nouvelles » doit s'expliquer au premier coup d'oeil, sinon le lecteur
+     conclut que le système est cassé. */}}
+<p class="avertissement">
+  {{.Muets}} poste(s) ne se sont pas manifestés. Les colonnes correspondantes
+  ne disent pas que les fichiers manquent : elles disent qu'on ne sait pas.
+</p>
+{{end}}
+
+{{if not .Postes}}
+<p>Aucun poste connu. Un poste apparaît ici dès qu'il s'est connecté une fois.</p>
+{{else}}
+<div class="tableau-large">
+<table>
+  <thead>
+    <tr>
+      <th>Fichier</th>
+      <th>Partout ?</th>
+      {{range .Postes}}
+      <th>
+        {{.Libelle}}<br><small>{{.Compte}}</small>
+        {{if not .AParle}}<br><small class="muet">{{if .TeteIllisible}}position illisible{{else}}sans nouvelles{{end}}</small>
+        {{else}}<br><small>vu le {{.RecuLe}}</small>{{end}}
+      </th>
+      {{end}}
+    </tr>
+  </thead>
+  <tbody>
+    {{range .Lignes}}
+    <tr>
+      <td class="chemin">
+        {{.Chemin}}
+        {{if not .SurLeServeur}}<br><small class="local">n'existe que sur un poste</small>{{end}}
+      </td>
+      <td>
+        {{if not .Certain}}<span class="etat sans-nouvelles">on ne sait pas</span>
+        {{else if .Arrive}}<span class="etat a-jour">oui</span>
+        {{else}}<span class="etat pas-arrive">non</span>{{end}}
+      </td>
+      {{range .Cases}}
+      <td>
+        <span class="etat {{.Etat}}">
+          {{if eq .Etat "a-jour"}}à jour
+          {{else if eq .Etat "en-retard"}}en retard
+          {{else if eq .Etat "pas-arrive"}}pas arrivé
+          {{else if eq .Etat "laisse"}}laissé
+          {{else if eq .Etat "arbitrage-en-attente"}}arbitrage en attente
+          {{else}}sans nouvelles{{end}}
+        </span>
+        {{if .Motif}}<br><small class="motif">{{.Motif}}</small>{{end}}
+      </td>
+      {{end}}
+    </tr>
+    {{if .Acces}}
+    <tr class="acces">
+      <td colspan="{{len .Cases}}" class="acces-liste">
+        Accès :
+        {{range .Acces}}<span class="qui">{{.Compte}} — {{.Niveau}} <small>({{.Source}})</small></span>{{end}}
+      </td>
+      <td></td><td></td>
+    </tr>
+    {{end}}
+    {{end}}
+  </tbody>
+</table>
+</div>
+{{end}}
+
+<style>
+  .avertissement {
+    background: var(--surface); border-left: 3px solid var(--accent);
+    padding: .6rem .8rem; border-radius: 4px;
+  }
+  /* Le tableau déborde dès qu'il y a plus de trois postes : il défile dans son
+     propre cadre, jamais la page. */
+  .tableau-large { overflow-x: auto; }
+  .tableau-large table { min-width: 100%; }
+  td.chemin { font-family: ui-monospace, monospace; font-size: .85rem; }
+  .etat { display: inline-block; padding: .1rem .4rem; border-radius: 3px; font-size: .8rem; }
+  /* La couleur ne porte JAMAIS l'information seule : chaque case dit son état
+     en toutes lettres. Un daltonien lit le même tableau. */
+  .etat.a-jour { background: #1f4d2e; color: #d9f2e0; }
+  .etat.en-retard, .etat.pas-arrive { background: #5c2323; color: #f6dede; }
+  .etat.laisse { background: #5c4a1f; color: #f7ecd2; }
+  .etat.arbitrage-en-attente { background: #2c3d5c; color: #dde6f7; }
+  .etat.sans-nouvelles { background: var(--surface); color: var(--encre); border: 1px dashed currentColor; }
+  small.muet, small.local { opacity: .75; font-style: italic; }
+  small.motif { opacity: .8; }
+  tr.acces td { border-top: 0; padding-top: 0; }
+  .acces-liste { font-size: .8rem; opacity: .85; }
+  .qui { margin-right: .9rem; white-space: nowrap; }
+</style>
+{{end}}

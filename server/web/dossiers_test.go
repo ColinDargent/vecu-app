@@ -123,6 +123,23 @@ func TestEchappementHTML(t *testing.T) {
 	if strings.Contains(rec.Body.String(), "<b>gras</b>") {
 		t.Error("contenu non échappé dans la page fichier")
 	}
+	// UNE DECISION A BOUGE ICI (03/09, le rendu markdown). Ce fichier est un
+	// `.md` : sa vue par défaut n'est plus le texte échappé par html/template,
+	// c'est le markdown rendu, où le HTML brut d'une note est JETE par goldmark
+	// (jamais échappé, jamais exécuté - voir markdown_test.go, qui garde cette
+	// propriété-là sur six vecteurs). L'assertion ci-dessus reste donc vraie,
+	// mais pour une autre raison, et « &lt;b&gt; » n'apparaît plus.
+	//
+	// L'échappement, lui, n'a pas disparu : il garde la vue SOURCE, qui est
+	// l'autre moitié de cet écran et le seul endroit où le contenu d'un fichier
+	// est encore inséré tel quel. C'est là que le test le vérifie maintenant.
+	rec = get(h, "/admin/dossiers/notes/x%3Cscript%3E.md?source", c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("vue source : attendu 200, obtenu %d", rec.Code)
+	}
+	if strings.Contains(rec.Body.String(), "<b>gras</b>") {
+		t.Error("contenu non échappé dans la vue source")
+	}
 	if !strings.Contains(rec.Body.String(), "&lt;b&gt;gras&lt;/b&gt;") {
 		t.Error("contenu échappé absent")
 	}

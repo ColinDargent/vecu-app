@@ -1,34 +1,17 @@
 {{define "title"}}Skills{{end}}
 
-{{/* Trois silhouettes franchement différentes : l'état se lit à la FORME, pas à
-     la couleur. Un daltonien, ou une capture en niveaux de gris, doit distinguer
-     les trois. D'où l'œil barré / l'œil / le crayon, et pas trois pastilles. */}}
-{{define "icone"}}
-{{- if eq . "invisible" -}}
-<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
-  <path d="M1 8s2.5-4.5 7-4.5S15 8 15 8s-2.5 4.5-7 4.5S1 8 1 8z"/>
-  <circle cx="8" cy="8" r="1.9"/>
-  <path d="M2.5 13.5l11-11"/>
-</svg>
-{{- else if eq . "lecture" -}}
-<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true">
-  <path d="M1 8s2.5-4.5 7-4.5S15 8 15 8s-2.5 4.5-7 4.5S1 8 1 8z"/>
-  <circle cx="8" cy="8" r="1.9"/>
-</svg>
-{{- else -}}
-<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"
-     stroke-linejoin="round" aria-hidden="true">
-  <path d="M2 14l.9-3.4 7.3-7.3 2.5 2.5-7.3 7.3L2 14z"/>
-  <path d="M9.6 3.9l2.5 2.5"/>
-</svg>
-{{- end -}}
-{{end}}
 
 {{define "content"}}
 <style>
   /* Les couleurs viennent des variables du layout : la peau se change à un
      seul endroit, et cette page suit sans être touchée. Zéro dépendance : SVG
-     en ligne, pas d'icon font, pas de chaîne de build front. */
+     en ligne, pas d'icon font, pas de chaîne de build front.
+
+     CE QUI N'EST PLUS ICI (04/09) : tout ce que l'écran des cohortes rend
+     aussi - `.resume`, `.reglage`, `.grille-partage`, `.choix`, `.liste-skills`,
+     `.large`, `.ok`, `.form-tags`, `.partage` - est monté dans le gabarit.
+     Déclaré ici, il ne suivait pas le voisin qui réutilisait le même panneau.
+     Ne redescend ici que ce qui ne sert QU'À CET ÉCRAN. */
   /* `hidden` seul ne suffit pas sur une ligne de tableau : la règle
      `tr { display: table-row }` de la feuille du navigateur peut l'emporter. */
   tr[hidden] { display: none; }
@@ -54,53 +37,19 @@
   details.skill[open] > summary::before { content: "\25BE"; color: var(--accent); }
   details.skill > .detail { padding: .25rem 0 .35rem 1em; }
   details.skill > .detail p { margin: .2rem 0; max-width: 46rem; }
-  .form-tags { display: flex; gap: .4rem; align-items: center; flex-wrap: wrap; margin: .4rem 0 .2rem; }
-  .form-tags label { display: flex; gap: .4rem; align-items: center; font-size: 12.5px; }
-  /* Le résumé du partage : ce qu'on lit sans déplier. L'icône porte le niveau,
-     donc il reste lisible en niveaux de gris, comme les boutons qu'il remplace. */
-  /* La colonne cesse de grandir avec l'équipe : c'était tout l'objet du
-     changement, un résumé qui s'étale la reprendrait par la fenêtre. */
-  td.partage { max-width: 30rem; }
-  /* Sur une fenêtre étroite, c'est le TABLEAU qui défile, pas la page : une
-     barre horizontale sous le document déplace aussi le titre et le menu. */
-  .large { overflow-x: auto; }
-  .resume { display: flex; flex-wrap: wrap; gap: .1rem .9rem; font-size: 12.5px; }
-  .resume-niveau { display: inline-flex; align-items: center; gap: .3rem; }
-  .resume-niveau svg { width: .95rem; height: .95rem; color: var(--encre-douce); flex: none; }
-  details.reglage { margin-top: .25rem; }
-  details.reglage > summary { cursor: pointer; font-size: 12.5px; color: var(--encre-douce); }
-  .grille-partage { width: auto; margin: .35rem 0; border-collapse: collapse; }
-  .grille-partage th[scope="row"] { text-align: left; font-weight: normal; padding-right: .8rem; }
-  .grille-partage td { padding: .1rem .3rem; }
-  .choix { display: inline-flex; align-items: center; gap: .3rem; font-size: 12.5px; cursor: pointer; }
-  /* Le message d'un geste qui vient d'aboutir. Il se lit au TRAIT, pas à la
-     teinte : une bande à gauche reste visible en niveaux de gris. */
-  .ok {
-    margin: .3rem 0; padding: .25rem .5rem; font-size: 12.5px;
-    background: var(--surface-2); border-left: 3px solid var(--accent);
-  }
-  /* La composition d'un groupe : bornée en hauteur, elle défile plutôt que de
-     pousser le reste de la page hors de l'écran à trente skills. */
-  .liste-skills {
-    display: flex; flex-wrap: wrap; gap: .1rem .9rem;
-    max-height: 12rem; overflow: auto; margin: .3rem 0;
-    padding: .3rem; border: 1px solid var(--trait-fin);
-  }
-  /* Les règles internes : repliées, pour la raison qui vaut juste au-dessus.
-     Un groupe de skills produit une règle par skill, et la liste déroulée
-     chassait de l'écran la grille de partage qu'elle commente. Le compte se
-     lit sans déplier ; seul le résumé garde la teinte d'alerte, parce qu'il
-     prévient d'un geste sans effet. Même geste que dans dossiers.html. */
+  /* Les règles internes d'une ligne de tableau : la forme repliée vit dans le
+     gabarit, seule la cellule qui les porte est propre à cet écran. */
   td.cellule-internes { padding: .1rem .3rem; }
-  details.internes > summary { cursor: pointer; font-size: 11.5px; color: var(--alerte); }
-  .liste-internes {
-    list-style: none; margin: .3rem 0 0; padding: .3rem;
-    max-height: 9rem; overflow: auto;
+  /* Les cases de cohortes d'un skill : un `<fieldset>` nu porte le cadre épais
+     et la marge du navigateur, qui l'isolent du bouton « Ranger » juste en
+     dessous alors qu'ils partent ensemble. */
+  .choix-groupes {
+    display: flex; flex-wrap: wrap; gap: .1rem .9rem; align-items: center;
+    margin: 0; padding: .25rem .5rem .4rem;
     border: 1px solid var(--trait-fin); background: var(--creux);
   }
-  .liste-internes li { font-size: 11px; line-height: 1.55; }
-  details.internes p { margin: .3rem 0 0; font-size: 11.5px; color: var(--encre-douce); }
-  .choix svg { width: .95rem; height: .95rem; color: var(--encre-douce); }
+  .choix-groupes legend { font-size: 11px; text-transform: uppercase; letter-spacing: .09em;
+                          color: var(--encre-douce); font-weight: 700; padding: 0 .25rem; }
 </style>
 
 <h1>Skills</h1>
@@ -157,7 +106,7 @@ des personnes qui y ont accès et se projette vers leur agent (Claude Code), san
           {{if .Description}}<p class="discret">{{.Description}}</p>{{end}}
           {{if not .Projetable}}<p class="erreur">Non projeté : {{.Raison}}</p>{{end}}
           {{if .Gere}}
-          {{/* Ranger un skill EST son geste de partage : le groupe porte les
+          {{/* Ranger un skill EST son geste de partage : la cohorte porte les
                droits, les icônes de la ligne restent pour les exceptions au
                cas par cas. */}}
           <form method="post" action="/admin/skills/ranger" class="form-tags">
@@ -167,25 +116,50 @@ des personnes qui y ont accès et se projette vers leur agent (Claude Code), san
                  opérations ET le marketing ». L'ensemble coché fait foi. */}}
             {{$dans := .DansGroupes}}
             {{if $.Groupes}}
+            {{/* « Cohortes », comme partout ailleurs (04/09). Cette légende
+                 disait « Groupes », et le paragraphe d'à côté renvoyait à une
+                 « section Groupes » qui n'existe plus depuis que les cohortes
+                 ont pris leur propre page, le 01/09. Deux mots pour un objet,
+                 dont l'un désigne un endroit disparu. */}}
+            {{/* SEULES LES COHORTES DE SKILLS SONT PROPOSÉES (04/09). La liste
+                 les mélangeait avec les cohortes de dossiers : cocher « Équipe
+                 delivery » rangeait bien le skill dedans, et il y devenait
+                 introuvable - le panneau d'une cohorte de dossiers n'affiche
+                 aucune case de skill, donc rien ne l'en sortait plus.
+
+                 LA CASE D'UNE COHORTE OÙ LE SKILL EST DÉJÀ reste rendue, quel
+                 que soit son genre, et c'est vital : l'ensemble coché FAIT FOI
+                 pour cette route. Filtrer sans cette exception retirerait en
+                 silence, au premier « Ranger » venu, une appartenance que
+                 l'écran aurait cessé de montrer. */}}
             <fieldset class="choix-groupes">
-              <legend>Groupes</legend>
+              <legend>Cohortes</legend>
               {{range $.Groupes}}
+              {{if or (eq .Genre "skill") (index $dans .ID)}}
               <label class="choix">
                 <input type="checkbox" name="groupe_id" value="{{.ID}}"
                        {{if index $dans .ID}}checked{{end}}>
-                <span>{{.Nom}}</span>
+                <span>{{.Nom}}{{if ne .Genre "skill"}} <span class="discret">(cohorte de dossiers)</span>{{end}}</span>
               </label>
               {{end}}
+              {{end}}
+              {{if not $.AuMoinsUneCohorteSkill}}
+              <span class="discret">Aucune cohorte de skills. Elles se créent
+              <a href="/admin/cohortes#creer-groupe">sur leur page</a>.</span>
+              {{end}}
             </fieldset>
+            {{if $.AuMoinsUneCohorteSkill}}
             <p class="discret">Aucune case cochée : le skill redevient privé.</p>
+            {{end}}
             {{else}}
-            {{/* La liste des groupes n'est servie qu'aux administrateurs. Un
-                 créateur non-admin voit donc ce cas même quand des groupes
+            {{/* La liste des cohortes n'est servie qu'aux administrateurs. Un
+                 créateur non-admin voit donc ce cas même quand des cohortes
                  existent : ne PAS lui affirmer qu'il n'y en a pas. Le bouton
                  reste rendu, comme avant les cases - sans lui, l'écran
                  proposerait un geste que le handler autorise et que rien ne
                  permet de déclencher. */}}
-            <p class="discret">Les groupes se règlent depuis la section Groupes, réservée aux administrateurs.</p>
+            <p class="discret">Les cohortes se composent depuis leur propre page, réservée aux
+            administrateurs. Demandez-en une à un administrateur pour y ranger ce skill.</p>
             {{end}}
             <button>Ranger</button>
           </form>
@@ -220,16 +194,7 @@ des personnes qui y ont accès et se projette vers leur agent (Claude Code), san
            qui lit, qui n'a rien - et il tient sur une ligne ; régler est un
            geste rare, qui a le droit de demander un dépli. */}}
       <td class="partage">
-        <div class="resume">
-          {{range .Resume}}
-          <span class="resume-niveau">
-            {{template "icone" .Valeur}}
-            <span class="discret">{{.Libelle}}</span>
-            {{if .Comptes}}{{range $i, $c := .Comptes}}{{if $i}}, {{end}}{{$c}}{{end}}{{if .Reste}} <span class="discret">+{{.Reste}}</span>{{end}}
-            {{else}}<span class="discret">—</span>{{end}}
-          </span>
-          {{end}}
-        </div>
+        {{template "resume" .Resume}}
         {{/* <details> est du HTML : le panneau s'ouvre et le formulaire part
              sans une ligne de JavaScript. */}}
         <details class="reglage" id="partage-{{.Slug}}"{{if eq $.Confirme .Slug}} open{{end}}>
@@ -286,9 +251,10 @@ des personnes qui y ont accès et se projette vers leur agent (Claude Code), san
 <p class="discret" id="aucun-resultat" hidden>Aucun skill ne correspond à ce filtre.</p>
 {{if .Gestion}}
 <p class="discret">Le résumé montre le droit qui s'applique aujourd'hui. Il peut venir du niveau
-par défaut du compte ou de son groupe, sans règle posée sur le skill : n'enregistrer que ce que
+par défaut du compte ou de sa cohorte, sans règle posée sur le skill : n'enregistrer que ce que
 vous changez le laisse continuer d'en dépendre. Vous ne réglez le partage que sur les skills dont
-vous êtes le créateur.</p>
+vous êtes le créateur. Les cohortes de skills, elles, se composent
+<a href="/admin/cohortes#skills">sur leur page</a>.</p>
 {{else}}
 <p class="discret">Vous n'êtes le créateur d'aucun de ces skills : ils vous ont été partagés.
 Déposez un dossier <code>shared/skills/&lt;slug&gt;/</code> avec un <code>SKILL.md</code> et vous
@@ -299,115 +265,6 @@ en réglerez le partage ici.</p>
 contenant un <code>SKILL.md</code> ; déposez-en dans l'espace <code>shared</code> et il apparaîtra ici.</p>
 {{end}}
 
-{{if .Groupes}}
-<h2 id="groupes">Groupes</h2>
-{{if .ConfirmeGroupes}}<p class="ok" role="status">Enregistré.</p>{{end}}
-<p class="discret">Un groupe porte les droits de tous les skills qu'il contient. Une règle posée
-sur un skill précis l'emporte sur celle de son groupe, dans les deux sens.</p>
-<div class="large">
-<table>
-  <tr><th>Groupe</th><th>Skills</th><th>Accès</th><th></th></tr>
-  {{range .Groupes}}
-  {{$groupe := .}}
-  <tr>
-    <td>
-      <strong>{{.Nom}}</strong>
-      {{/* Renommer et composer sont la même décision - « ce groupe, c'est
-           quoi » - donc un seul panneau et un seul « Enregistrer ». La colonne
-           « Skills » d'à côté reste la lecture ; c'est ici qu'on écrit. */}}
-      <details class="reglage" id="groupe-{{.ID}}"{{if $.ConfirmeGroupes}} open{{end}}>
-        <summary>Modifier le groupe</summary>
-        <form method="post" action="/admin/skills/groupes/modifier">
-          <input type="hidden" name="groupe_id" value="{{.ID}}">
-          <label class="form-tags">Nom
-            <input name="nom" value="{{.Nom}}" required maxlength="60" size="24"></label>
-          {{if $.Skills}}
-          <p class="discret">Les skills cochés appartiennent à ce groupe. En décocher un l'en sort,
-          et le laisse dans ses autres groupes : seuls les accès que CE groupe lui ouvrait se referment.</p>
-          <div class="liste-skills">
-            {{range $.Skills}}
-            <label class="choix">
-              <input type="checkbox" name="slug" value="{{.Slug}}"
-                     {{if index .DansGroupes $groupe.ID}}checked{{end}}>
-              <code>{{.Slug}}</code>
-            </label>
-            {{end}}
-          </div>
-          {{else}}
-          <p class="discret">Aucun skill à ranger pour l'instant.</p>
-          {{end}}
-          {{/* Les dossiers sont EN LECTURE : ils se règlent depuis la page du
-               dossier, seule surface autoritaire de cet ensemble. */}}
-          {{if .Dossiers}}
-          <p class="discret">Dossiers portés par cette cohorte :
-            {{range $i, $d := .Dossiers}}{{if $i}}, {{end}}<a href="/admin/dossiers/{{$d}}"><code>{{$d}}</code></a>{{end}}.
-            Ils se retirent depuis la page du dossier.</p>
-          {{end}}
-          <button>Enregistrer</button>
-        </form>
-      </details>
-    </td>
-    <td>{{if .Skills}}{{range .Skills}}<code>{{.}}</code> {{end}}{{else}}<span class="discret">vide</span>{{end}}</td>
-    {{/* Le même panneau que le partage d'un skill, pour la même raison : une
-         colonne par compte faisait grandir le tableau avec l'équipe. Et le
-         même « Enregistrer », donc le même retour visible - les icônes cliquées
-         une par une écrivaient bien, mais rechargeaient une page de 220 Ko dont
-         cette section est à la fin : on ne voyait jamais le résultat. */}}
-    <td class="partage">
-      <div class="resume">
-        {{range .Resume}}
-        <span class="resume-niveau">
-          {{template "icone" .Valeur}}
-          <span class="discret">{{.Libelle}}</span>
-          {{if .Comptes}}{{range $i, $c := .Comptes}}{{if $i}}, {{end}}{{$c}}{{end}}{{if .Reste}} <span class="discret">+{{.Reste}}</span>{{end}}
-          {{else}}<span class="discret">—</span>{{end}}
-        </span>
-        {{end}}
-      </div>
-      <details class="reglage" id="acces-groupe-{{.ID}}"{{if $.ConfirmeGroupes}} open{{end}}>
-        <summary>Régler l'accès au groupe</summary>
-        <form method="post" action="/admin/skills/groupes/membres">
-          <input type="hidden" name="groupe_id" value="{{.ID}}">
-          <table class="grille-partage">
-            {{range .Membres}}
-            {{$membre := .}}
-            <tr>
-              <th scope="row">{{.Username}}</th>
-              {{range $.Niveaux}}
-              <td><label class="choix">
-                <input type="radio" name="niveau_{{$membre.UserID}}" value="{{.Valeur}}"
-                       {{if eq .Valeur $membre.Niveau}}checked{{end}}>
-                {{template "icone" .Valeur}} <span>{{.Libelle}}</span>
-              </label></td>
-              {{end}}
-            </tr>
-            {{end}}
-          </table>
-          <button>Enregistrer</button>
-        </form>
-      </details>
-    </td>
-    <td>
-      <form method="post" action="/admin/skills/groupes/supprimer">
-        <input type="hidden" name="groupe_id" value="{{.ID}}">
-        <button>Supprimer</button>
-      </form>
-    </td>
-  </tr>
-  {{end}}
-</table>
-</div>
-<p class="discret">Supprimer un groupe referme les accès qu'il ouvrait. Les skills qu'il
-contenait redeviennent privés, et rien n'est à nettoyer ailleurs.</p>
-{{end}}
-{{if .User.IsAdmin}}
-<h2 id="creer-groupe">Créer un groupe</h2>
-{{if and .ConfirmeGroupes (not .Groupes)}}<p class="ok" role="status">Enregistré.</p>{{end}}
-<form method="post" action="/admin/skills/groupes" class="form-tags">
-  <input name="nom" placeholder="Équipe contenu" required>
-  <button>Créer</button>
-</form>
-{{end}}
 
 
 <script>

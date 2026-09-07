@@ -1,10 +1,32 @@
 {{define "title"}}Connexion{{end}}
 {{define "content"}}
-<h1>Connexion à Vécu</h1>
-{{if .Erreur}}<p class="erreur">{{.Erreur}}</p>{{end}}
-<form method="post" action="/admin/login">
-  <p><label>Nom d'utilisateur<br><input name="username" autocomplete="username" required></label></p>
-  <p><label>Mot de passe<br><input name="password" type="password" autocomplete="current-password" required></label></p>
-  <p><button>Se connecter</button></p>
-</form>
+{{/* LE FORMULAIRE EST CENTRÉ, dans un cadre (04/09). Il vivait en haut à
+     gauche d'une fenêtre vide de 1400 pixels : trois champs perdus dans un
+     angle, avec pour tout indice le titre de la barre. Le cadre et le centrage
+     ne changent rien à ce qu'on tape, ils disent où regarder - et c'est le seul
+     écran que voit quelqu'un qui n'est pas encore entré. */}}
+<style>
+  .entree { display: flex; justify-content: center; padding: 3rem 1rem; }
+  .entree .boite {
+    width: 22rem; max-width: 100%; padding: 1.1rem 1.2rem 1.3rem;
+    border: 1px solid var(--trait); background: var(--surface); box-shadow: var(--relief);
+  }
+  .entree h1 { margin-bottom: .9rem; }
+  .entree label { display: block; font-size: 12.5px; color: var(--encre-douce); }
+  .entree input { width: 100%; margin-top: .2rem; }
+  .entree p { margin: 0 0 .8rem; }
+  .entree .envoi { margin: 1rem 0 0; }
+  .entree button { width: 100%; padding: .4rem; }
+</style>
+<div class="entree">
+  <div class="boite">
+    <h1>Connexion à Vécu</h1>
+    {{if .Erreur}}<p class="erreur" role="alert">{{.Erreur}}</p>{{end}}
+    <form method="post" action="/admin/login">
+      <p><label>Nom d'utilisateur<input name="username" autocomplete="username" autofocus required></label></p>
+      <p><label>Mot de passe<input name="password" type="password" autocomplete="current-password" required></label></p>
+      <p class="envoi"><button>Se connecter</button></p>
+    </form>
+  </div>
+</div>
 {{end}}

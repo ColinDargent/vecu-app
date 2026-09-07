@@ -104,7 +104,7 @@ func TestCollisionDeCasseNeProduitPlusLaCopieDu22Aout(t *testing.T) {
 	// Le second chemin apparait sur le serveur, a la casse pres. Pousse par un
 	// chemin qui ne passe pas par le disque de A : sur APFS son poste ne peut pas
 	// porter les deux non plus, et c'est le SERVEUR qu'on veut dans cet etat.
-	if _, err := a.client.Put("equipe/AGENTS.md", contexte, ""); err != nil {
+	if _, err := a.client.Put("equipe/AGENTS.md", contexte, "", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -184,7 +184,7 @@ func TestFantomeDeCassePreexistantEstInerte(t *testing.T) {
 	if err := b.SyncOnce(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.client.Put("equipe/AGENTS.md", contexte, ""); err != nil {
+	if _, err := a.client.Put("equipe/AGENTS.md", contexte, "", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -306,7 +306,7 @@ func TestCollisionDeCasseSeJournalise(t *testing.T) {
 	if err := b.SyncOnce(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.client.Put("equipe/AGENTS.md", "# Contexte\n", ""); err != nil {
+	if _, err := a.client.Put("equipe/AGENTS.md", "# Contexte\n", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.SyncOnce(); err != nil {
@@ -401,7 +401,7 @@ func TestCollisionDeCasseRefuseeEtStable(t *testing.T) {
 	if err := b.SyncOnce(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.client.Put("equipe/AGENTS.md", contexte, ""); err != nil {
+	if _, err := a.client.Put("equipe/AGENTS.md", contexte, "", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -475,7 +475,7 @@ func TestCollisionDeCasseNeFaitPasEchouerLaCommande(t *testing.T) {
 	if err := b.SyncOnce(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.client.Put("equipe/AGENTS.md", "# Contexte\n", ""); err != nil {
+	if _, err := a.client.Put("equipe/AGENTS.md", "# Contexte\n", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.SyncOnce(); err != nil {
@@ -594,7 +594,7 @@ func TestFantomesDeCasseAucunApresUnCycleSain(t *testing.T) {
 	if err := b.SyncOnce(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.client.Put("equipe/AGENTS.md", "# Contexte\n", ""); err != nil {
+	if _, err := a.client.Put("equipe/AGENTS.md", "# Contexte\n", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.SyncOnce(); err != nil {

@@ -54,12 +54,23 @@ func main() {
 	// Un seul magasin de billets pour les deux serveurs : l'API les émet
 	// (depuis l'app, authentifiée par son jeton d'appareil), le web les consomme.
 	billets := tickets.New()
-	apiSrv := &api.Server{DB: database, Store: store, AppDist: envOr("VECU_APPDIST", "appdist"), Tickets: billets}
+	apiSrv := &api.Server{
+		DB: database, Store: store, AppDist: envOr("VECU_APPDIST", "appdist"),
+		Tickets: billets, Logf: log.Printf,
+	}
 	webSrv := &web.Server{DB: database, Store: store, Tickets: billets}
 	// /admin/ (préfixe le plus spécifique) → web admin ; le reste → API JSON.
 	root := http.NewServeMux()
 	root.Handle("/admin/", webSrv.Handler())
 	root.Handle("/", apiSrv.Handler())
+	// LA RACINE MÈNE QUELQUE PART (04/09). Taper l'adresse du serveur dans un
+	// navigateur - le seul geste qu'on fait sans qu'on le lui ait appris -
+	// tombait sur le mux de l'API, qui n'a pas de route `/` et rendait un 404
+	// nu. `{$}` ne matche QUE le chemin exact `/`, donc l'API garde tout le
+	// reste, y compris ses propres 404 quand ils sont mérités.
+	root.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/admin/", http.StatusSeeOther)
+	})
 	log.Printf("vecu server à l'écoute sur %s (data: %s)", addr, dataDir)
 	if err := http.ListenAndServe(addr, root); err != nil {
 		log.Fatal(err)

@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -61,6 +62,9 @@ func newEngine(t *testing.T, url, token string) (*Engine, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows ne supprime pas un fichier ouvert : sans ce relâchement, le
+	// nettoyage de t.TempDir() échoue sur .vecu/lock. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = e.Close() })
 	// Les tests déposent des fichiers dans « equipe » avant le premier cycle :
 	// c'est le scénario d'import, qui exige une adoption explicite.
 	e.Importer([]string{"equipe"})
@@ -548,6 +552,9 @@ func TestEspaceNAdoptePasUnDossierLocal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows ne supprime pas un fichier ouvert : sans ce relâchement, le
+	// nettoyage de t.TempDir() échoue sur .vecu/lock. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = e.Close() })
 	// Un dossier personnel antérieur, du même nom que l'espace du serveur.
 	writeFile(t, dir, "shared/impots-2025.md", "strictement personnel\n")
 	if err := database.SetPermission(membreID, "shared", perms.Ecriture); err != nil {
@@ -635,6 +642,19 @@ func TestDossierEspaceSupprimeNeVidePasLeServeur(t *testing.T) {
 // avoir l'aspect d'un dossier lu en entier - c'est de cette confusion que
 // naissent toutes les suppressions abusives.
 func TestScanDistingueVuDeSur(t *testing.T) {
+	// Ce test rend un dossier ILLISIBLE avec un bit de permission Unix pour
+	// vérifier qu'un ReadDir en échec ne se prend pas pour un dossier vide - la
+	// distinction qui évite de propager une suppression fantôme. Windows ne
+	// porte pas ces bits : `os.Chmod` n'y touche que le drapeau lecture seule,
+	// le dossier reste lisible, et le test vérifierait le contraire de ce qu'il
+	// annonce.
+	//
+	// Ce que ça laisse découvert : la garde « vu contre sûr » n'est pas exercée
+	// sur Windows. À couvrir par une ACL le jour où on saura en poser une en
+	// test - noté dans spec-port-windows.md.
+	if runtime.GOOS == "windows" {
+		t.Skip("précondition = dossier illisible par permission Unix, sans effet sur Windows")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root ignore les droits : le dossier illisible serait lu quand même")
 	}
@@ -734,6 +754,19 @@ func arbre(t *testing.T, e *Engine) map[string]bool {
 // sous-dossier illisible. Ses fichiers deviennent absents du scan - ils ne
 // deviennent pas supprimés pour autant.
 func TestDossierIllisibleNeSupprimePasChezTousLesMembres(t *testing.T) {
+	// Ce test rend un dossier ILLISIBLE avec un bit de permission Unix pour
+	// vérifier qu'un ReadDir en échec ne se prend pas pour un dossier vide - la
+	// distinction qui évite de propager une suppression fantôme. Windows ne
+	// porte pas ces bits : `os.Chmod` n'y touche que le drapeau lecture seule,
+	// le dossier reste lisible, et le test vérifierait le contraire de ce qu'il
+	// annonce.
+	//
+	// Ce que ça laisse découvert : la garde « vu contre sûr » n'est pas exercée
+	// sur Windows. À couvrir par une ACL le jour où on saura en poser une en
+	// test - noté dans spec-port-windows.md.
+	if runtime.GOOS == "windows" {
+		t.Skip("précondition = dossier illisible par permission Unix, sans effet sur Windows")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root ignore les droits : le dossier serait lu quand même")
 	}
@@ -1508,6 +1541,9 @@ func TestDeplacementEntreEspacesNeDuplique(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows ne supprime pas un fichier ouvert : sans ce relâchement, le
+	// nettoyage de t.TempDir() échoue sur .vecu/lock. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = e.Close() })
 	e.SurSuppressionMassive(func(string, int, int) bool { return true })
 
 	if err := e.SyncOnce(); err != nil {
@@ -1559,6 +1595,9 @@ func TestSuppressionRefuseeEnLectureSeuleEstSignalee(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows ne supprime pas un fichier ouvert : sans ce relâchement, le
+	// nettoyage de t.TempDir() échoue sur .vecu/lock. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = e.Close() })
 	if err := database.SetPermission(membreID, "shared", perms.Lecture); err != nil {
 		t.Fatal(err)
 	}
@@ -1605,6 +1644,9 @@ func TestRienNestToucheHorsDeLaRacineAuDemontage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows ne supprime pas un fichier ouvert : sans ce relâchement, le
+	// nettoyage de t.TempDir() échoue sur .vecu/lock. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = e.Close() })
 	if err := database.SetPermission(membreID, "shared", perms.Ecriture); err != nil {
 		t.Fatal(err)
 	}
@@ -1697,6 +1739,9 @@ func TestDossierReutiliseNestPasPublieAuRemontage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows ne supprime pas un fichier ouvert : sans ce relâchement, le
+	// nettoyage de t.TempDir() échoue sur .vecu/lock. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = e.Close() })
 	accorde := func(niveau perms.Level) {
 		t.Helper()
 		if err := database.SetPermission(membreID, "shared", niveau); err != nil {
@@ -1968,6 +2013,9 @@ func TestRemontageApresRetraitDAcces(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows ne supprime pas un fichier ouvert : sans ce relâchement, le
+	// nettoyage de t.TempDir() échoue sur .vecu/lock. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = e.Close() })
 	accorde := func(niveau perms.Level) {
 		t.Helper()
 		if err := database.SetPermission(membreID, "shared", niveau); err != nil {
@@ -2074,6 +2122,9 @@ func TestElargissementDeDroitsRattrape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows ne supprime pas un fichier ouvert : sans ce relâchement, le
+	// nettoyage de t.TempDir() échoue sur .vecu/lock. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = e.Close() })
 	// Accès à un seul fichier : l'espace est monté, mais amputé.
 	if err := database.SetPermission(membreID, "shared/note.md", perms.Lecture); err != nil {
 		t.Fatal(err)
@@ -2633,6 +2684,9 @@ func TestMigrationNeDonnePasLeHeadAUnCheminObstrue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows ne supprime pas un fichier ouvert : sans ce relâchement, le
+	// nettoyage de t.TempDir() échoue sur .vecu/lock. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = b2.Close() })
 	if b2.state.Versions != nil {
 		t.Fatal("prérequis : l'état rechargé ne doit porter aucun marque-page")
 	}
@@ -3568,6 +3622,9 @@ func TestRetraitGardeToutLeContenuLocal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows ne supprime pas un fichier ouvert : sans ce relâchement, le
+	// nettoyage de t.TempDir() échoue sur .vecu/lock. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = e2.Close() })
 	defer e2.Close()
 	if err := e2.SyncOnce(); err != nil {
 		t.Fatalf("cycle après retrait : %v", err)

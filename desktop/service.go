@@ -1,225 +1,85 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
-	"time"
 )
 
-// Supervision par launchd. L'app remplace l'ancien LaunchAgent `fr.vecu.sync`
-// (qui lançait « vecu start ») : elle devient elle-même le process supervisé.
+// service.go : ce que la supervision a de commun aux deux systèmes.
 //
-// Deux rôles pour un même binaire, distingués par la variable VECU_SERVICE
-// posée dans le plist :
-//   - instance de SERVICE (VECU_SERVICE=1, lancée par launchd) : tient le moteur
-//     et l'icône menu-bar, et c'est la SEULE qui acquiert le verrou du dossier.
-//     Elle ne touche JAMAIS launchd (sinon elle risquerait un bootout d'elle-même).
-//   - instance MANUELLE (double-clic sur l'app) : seule responsable de la
-//     migration/installation du service, puis elle sort. Elle ne lance jamais le
-//     moteur, donc ne prend jamais le verrou : pas de course avec le service.
+// L'app est elle-même le processus supervisé, et le même binaire tient deux
+// rôles distincts :
+//
+//   - instance de SERVICE (lancée par le superviseur du système) : elle tient le
+//     moteur et l'icône, et c'est la SEULE qui acquiert le verrou du dossier.
+//     Elle ne touche JAMAIS au superviseur, sinon elle risquerait de se retirer
+//     elle-même.
+//   - instance MANUELLE (double-clic sur l'app) : seule responsable de
+//     l'installation du service, puis elle sort. Elle ne lance jamais le moteur,
+//     donc ne prend jamais le verrou : pas de course avec le service.
+//
+// L'implémentation vit dans service_darwin.go (launchd) et service_windows.go
+// (Planificateur de tâches). Les deux tiennent le même contrat : `synchroniseService`
+// est idempotente et atteste le JOB RÉELLEMENT CHARGÉ, pas la seule présence d'un
+// fichier de définition.
 const (
 	labelService = "fr.vecu.sync" // même label que l'ancien daemon : l'installer le remplace
 	envService   = "VECU_SERVICE"
+
+	// drapeauService : comment le superviseur Windows dit « tu es le service ».
+	//
+	// launchd sait poser une variable d'environnement dans le plist ; le
+	// Planificateur de tâches n'a aucun élément équivalent dans son schéma - il
+	// sait passer des ARGUMENTS, et c'est tout. Plutôt que de faire diverger la
+	// détection selon le système, les deux voies sont acceptées partout (voir
+	// `estInstanceService`) : un seul comportement à comprendre, et il se teste
+	// sur macOS.
+	drapeauService = "--service"
 )
 
-// serviceCfg décrit le LaunchAgent désiré. `args` reste vide en usage réel (le
+// serviceCfg décrit le service désiré. `args` reste vide en usage réel (le
 // binaire de l'app ne prend pas d'argument) ; il n'existe que pour tester la
-// mécanique launchd avec un binaire bidon.
-type serviceCfg struct {
-	label   string
-	binaire string
-	racine  string
-	plist   string
-	journal string
-	args    []string
-}
-
-func cibleLaunchd() string { return fmt.Sprintf("gui/%d", os.Getuid()) }
-
-func cheminPlist(label string) string {
-	maison, _ := os.UserHomeDir()
-	return filepath.Join(maison, "Library", "LaunchAgents", label+".plist")
-}
-
-// contenuPlist : sérialisation DÉTERMINISTE (Sprintf statique, aucune map) — deux
-// appels à config égale rendent des octets identiques, ce dont dépend
-// l'idempotence de synchroniseService.
+// mécanique de supervision avec un binaire bidon.
 //
-// KeepAlive en dictionnaire {SuccessfulExit=false} : relancer sur sortie en
-// échec (crash), PAS sur une sortie propre — sinon « Quitter » depuis le menu
-// serait immédiatement rattrapé par launchd. RunAtLoad posé explicitement pour
-// le démarrage initial et au login.
-// Source: man launchd.plist (KeepAlive/SuccessfulExit, RunAtLoad), vérifié le 2026-07-26.
-func (c serviceCfg) contenuPlist() string {
-	var prog strings.Builder
-	for _, a := range append([]string{c.binaire}, c.args...) {
-		prog.WriteString("\n\t\t<string>" + echappeXML(a) + "</string>")
-	}
-	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-	<key>Label</key>
-	<string>%s</string>
-	<key>ProgramArguments</key>
-	<array>%s
-	</array>
-	<key>EnvironmentVariables</key>
-	<dict>
-		<key>%s</key>
-		<string>1</string>
-	</dict>
-	<key>RunAtLoad</key>
-	<true/>
-	<key>KeepAlive</key>
-	<dict>
-		<key>SuccessfulExit</key>
-		<false/>
-	</dict>
-	<key>WorkingDirectory</key>
-	<string>%s</string>
-	<key>StandardOutPath</key>
-	<string>%s</string>
-	<key>StandardErrorPath</key>
-	<string>%s</string>
-</dict>
-</plist>
-`, echappeXML(c.label), prog.String(), envService, echappeXML(c.racine), echappeXML(c.journal), echappeXML(c.journal))
+// `definition` est le chemin du fichier qui décrit le service : un plist
+// launchd sur macOS, un XML de tâche sur Windows. Le champ ne s'appelle plus
+// `plist` depuis le port : `main.go` n'a pas à savoir lequel des deux il manipule.
+type serviceCfg struct {
+	label      string
+	binaire    string
+	racine     string
+	definition string
+	journal    string
+	args       []string
 }
 
-// synchroniseService installe ou met à jour le LaunchAgent. Idempotent : ne fait
-// rien si le plist sur disque est déjà le désiré ET qu'un service tournant sous
-// ce label pointe bien sur le bon binaire (on atteste le JOB chargé, pas juste
-// la présence du fichier). Appelée uniquement par l'instance manuelle.
-// Retourne true si une (ré)installation a eu lieu.
-func synchroniseService(c serviceCfg) (installe bool, err error) {
-	desire := c.contenuPlist()
-	actuel, _ := os.ReadFile(c.plist)
-	if prog, charge := serviceProgramme(c.label); string(actuel) == desire && charge && prog == c.binaire {
-		return false, nil // déjà en place et le bon job tourne
+// estInstanceService : ce processus a-t-il été lancé par le superviseur ?
+//
+// Les deux voies sont vraies partout, délibérément. La variable d'environnement
+// est ce que launchd sait poser ; le drapeau est ce que le Planificateur de
+// tâches sait passer. Accepter les deux sur les deux systèmes coûte trois lignes
+// et évite qu'un défaut de démarrage ne se reproduise QUE sur le système où
+// personne ne développe.
+func estInstanceService() bool {
+	if os.Getenv(envService) == "1" {
+		return true
 	}
-
-	// Sauvegarde de l'ANCIEN plist, une seule fois : ne jamais écraser la
-	// sauvegarde du vrai plist d'origine (daemon CLI) par une version déjà migrée.
-	bak := c.plist + ".pre-vecu-app.bak"
-	if len(actuel) > 0 {
-		if _, e := os.Stat(bak); os.IsNotExist(e) {
-			_ = os.WriteFile(bak, actuel, 0o644)
+	for _, a := range os.Args[1:] {
+		if a == drapeauService {
+			return true
 		}
 	}
-
-	// Retirer l'ancien job (daemon CLI ou version précédente) et ATTENDRE qu'il
-	// ait disparu : bootout est asynchrone, et l'ancien daemon doit avoir relâché
-	// son verrou flock avant que le nouveau service ne tente de l'acquérir.
-	_ = bootoutService(c.label)
-	attendServiceParti(c.label, 5*time.Second)
-
-	if err := os.MkdirAll(filepath.Dir(c.plist), 0o755); err != nil {
-		return false, err
-	}
-	if err := ecritFichierAtomique(c.plist, []byte(desire)); err != nil {
-		return false, err
-	}
-	if err := bootstrapService(c.plist); err != nil {
-		// Bootstrap échoué APRÈS un bootout destructif : le poste se retrouverait
-		// sans aucune sync. Best-effort, restaurer l'ancien service (le plist
-		// d'origine sauvegardé) plutôt que de laisser un trou.
-		if b, e := os.ReadFile(bak); e == nil && len(b) > 0 {
-			if ecritFichierAtomique(c.plist, b) == nil {
-				_ = bootstrapService(c.plist)
-			}
-		}
-		return false, err
-	}
-	return true, nil
-}
-
-// serviceProgramme rend le chemin du binaire du job chargé sous ce label, et si
-// un job est chargé. Parse `launchctl print` (ligne « program = <chemin> »).
-func serviceProgramme(label string) (programme string, charge bool) {
-	out, err := exec.Command("launchctl", "print", cibleLaunchd()+"/"+label).CombinedOutput()
-	if err != nil {
-		return "", false
-	}
-	for _, ligne := range strings.Split(string(out), "\n") {
-		ligne = strings.TrimSpace(ligne)
-		if p, ok := strings.CutPrefix(ligne, "program = "); ok {
-			return strings.TrimSpace(p), true
-		}
-	}
-	return "", true // chargé, mais programme non lu (ex: décrit par ProgramArguments)
-}
-
-func serviceCharge(label string) bool {
-	return exec.Command("launchctl", "print", cibleLaunchd()+"/"+label).Run() == nil
-}
-
-// attendServiceParti attend que le label ne soit plus chargé, jusqu'à `max`.
-// Sans ça, un bootstrap qui suit un bootout se voit répondre « already loaded »,
-// et le nouveau service pourrait courir sur un verrou pas encore relâché.
-func attendServiceParti(label string, max time.Duration) {
-	fin := time.Now().Add(max)
-	for time.Now().Before(fin) {
-		if !serviceCharge(label) {
-			return
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-}
-
-func bootoutService(label string) error {
-	return exec.Command("launchctl", "bootout", cibleLaunchd()+"/"+label).Run()
-}
-
-// bootstrapService charge et démarre le service, avec quelques tentatives : sur
-// une transition récente, launchd peut répondre « already loaded » le temps que
-// le démontage précédent s'achève.
-func bootstrapService(plist string) error {
-	var derniere error
-	for i := 0; i < 10; i++ {
-		sortie, err := exec.Command("launchctl", "bootstrap", cibleLaunchd(), plist).CombinedOutput()
-		if err == nil {
-			return nil
-		}
-		derniere = fmt.Errorf("launchctl bootstrap : %v (%s)", err, strings.TrimSpace(string(sortie)))
-		time.Sleep(200 * time.Millisecond)
-	}
-	return derniere
-}
-
-// racineDepuisPlist extrait le dossier supervisé par un plist. Deux formes :
-// l'ancien daemon CLI le passe en argument « --dir <racine> » ; l'app migrée le
-// pose en WorkingDirectory. On lit les deux, pour que la racine reste toujours
-// récupérable depuis le plist seul.
-func racineDepuisPlist(path string) (string, bool) {
-	out, err := exec.Command("plutil", "-convert", "json", "-o", "-", path).Output()
-	if err != nil {
-		return "", false
-	}
-	var p struct {
-		ProgramArguments []string `json:"ProgramArguments"`
-		WorkingDirectory string   `json:"WorkingDirectory"`
-	}
-	if json.Unmarshal(out, &p) != nil {
-		return "", false
-	}
-	for i, a := range p.ProgramArguments {
-		if a == "--dir" && i+1 < len(p.ProgramArguments) {
-			return p.ProgramArguments[i+1], true
-		}
-	}
-	if p.WorkingDirectory != "" {
-		return p.WorkingDirectory, true
-	}
-	return "", false
+	return false
 }
 
 // ecritFichierAtomique écrit via un temporaire + rename, pour qu'une écriture
-// interrompue ne laisse jamais un plist tronqué (inchargeable).
+// interrompue ne laisse jamais une définition tronquée (inchargeable).
+//
+// Portable sans réserve : `os.Rename` passe par `MoveFileEx` avec
+// `MOVEFILE_REPLACE_EXISTING` sur Windows (os/file_windows.go), donc il écrase
+// une cible existante comme le fait `rename(2)` sur unix. Vérifié dans la source
+// de Go 1.26 plutôt que supposé - c'est exactement le genre de différence qu'on
+// croit connaître et qui est fausse dans un sens ou dans l'autre.
 func ecritFichierAtomique(path string, contenu []byte) error {
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, contenu, 0o644); err != nil {
@@ -228,8 +88,11 @@ func ecritFichierAtomique(path string, contenu []byte) error {
 	return os.Rename(tmp, path)
 }
 
-// echappeXML protège les caractères XML d'un chemin dans un plist (un dossier
-// peut contenir « & » ; un plist mal formé rend le service inchargeable).
+// echappeXML protège les caractères XML d'un chemin.
+//
+// Partagé par les deux systèmes, et ce n'est pas un hasard : le plist launchd et
+// le XML du Planificateur de tâches sont tous les deux du XML, et un dossier
+// contenant « & » rendrait l'un comme l'autre inchargeable.
 func echappeXML(s string) string {
 	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(s)
 }

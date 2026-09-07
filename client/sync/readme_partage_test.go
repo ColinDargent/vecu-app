@@ -47,6 +47,9 @@ func TestPartagerUnDossierQuiContientDejaUnReadme(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows ne supprime pas un fichier ouvert : sans ce relâchement, le
+	// nettoyage de t.TempDir() échoue sur .vecu/lock. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = e.Close() })
 	if err := e.SyncOnce(); err != nil {
 		t.Fatal(err)
 	}

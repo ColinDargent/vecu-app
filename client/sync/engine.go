@@ -70,6 +70,22 @@ type Engine struct {
 	laisses      []Laisse       // fichiers non synchronisés au dernier cycle, avec le motif
 	nouveaux     []NouveauSkill // skills d'autrui appris et pas encore lus (F4)
 	confirme     func(espace string, constatees, verifies int) bool
+	// entrePushEtPull : couture de test, nil en production.
+	//
+	// Elle ouvre la seule fenêtre du cycle qu'aucun test ne pouvait atteindre :
+	// entre l'envoi et la redescente du MÊME cycle. C'est là que vit le défaut
+	// mesuré le 31/08 (DAR-166) - un chemin créé sur ce poste est poussé, mais
+	// n'entre pas dans `Files`, donc le pull qui suit le juge « non suivi » et
+	// range l'édition arrivée entre-temps en copie plutôt qu'en report.
+	//
+	// Même gabarit que `confirme` : un champ, un nil-check au site d'appel,
+	// aucun effet observable quand il n'est pas posé.
+	entrePushEtPull func()
+	// maintenant : l'horloge de la corbeille, nil en production (= `time.Now`).
+	//
+	// Injectable parce que la rétention se teste en faisant vieillir un lot, et
+	// qu'un test qui attend trente jours n'est pas un test.
+	maintenant func() time.Time
 }
 
 // NewEngine charge config + état et prépare le moteur.
@@ -978,6 +994,10 @@ func (e *Engine) SyncOnce() error {
 	if err != nil {
 		return fmt.Errorf("push : %w", err)
 	}
+	// La couture de test, et rien d'autre ne vit ici.
+	if e.entrePushEtPull != nil {
+		e.entrePushEtPull()
+	}
 	// `reportes` traverse la fin du cycle comme `acceptes` en traverse le début.
 	//
 	// `reconcilePerimeter` s'en sert pour ne pas retirer du disque un chemin que
@@ -1052,6 +1072,14 @@ func (e *Engine) Cycle() error {
 	// une information, jamais un incident.
 	if err := e.Signale(); err != nil {
 		e.logf("signal des skills : %v", err)
+	}
+	// Le rapport au serveur APRES tout le reste, pour qu'il décrive le cycle
+	// complet et pas son milieu. Best-effort comme les trois précédents, et pour
+	// une raison de plus : un client neuf devant un serveur sans la route
+	// recevrait 404 à chaque cycle, et remonter cette erreur casserait la
+	// synchronisation d'un poste entier pour un renseignement d'affichage.
+	if err := e.Rapporte(); err != nil {
+		e.logf("rapport d'état au serveur : %v", err)
 	}
 	return nil
 }
@@ -1384,18 +1412,29 @@ func (e *Engine) pushLocal(base string, vu *scan) (map[string]string, error) {
 			e.noteHorsPerimetre(p, disk[p])
 			continue
 		}
-		res, err := e.client.Put(p, string(content), e.ancetreDe(p))
+		// L'EMPREINTE DE CE QU'ON CROIT REMPLACER (DAR-114). `Files[p]` est
+		// exactement ça : ce que le serveur portait à ce chemin la dernière fois
+		// qu'on l'a su. Le serveur la compare à ce qu'il porte vraiment, et range
+		// notre écriture en copie plutôt que d'écraser si les deux divergent.
+		//
+		// Absente sur un chemin non suivi - une création - et c'est correct :
+		// il n'y a alors rien à protéger, et opposer une empreinte vide
+		// bloquerait toute création.
+		res, err := e.client.Put(p, string(content), e.ancetreDe(p), e.state.Files[p])
 		if err != nil {
 			return acceptes, err // erreur transport : réessayer au cycle suivant
 		}
 		switch res.Status {
 		case http.StatusOK:
-			// Accepté par le serveur : ce contenu n'est plus « local et non
-			// poussé », quoi qu'il advienne ensuite. Retenu MÊME en cas de
-			// conflit signalé : le serveur a alors rangé le contenu dans une copie
-			// à lui, qui redescend chez tous les membres. En ajouter une seconde
-			// ici donnerait deux copies pour une seule divergence.
-			acceptes[p] = disk[p]
+			// L'empreinte de ce qui est PARTI, pas celle du scan. Les deux peuvent
+			// diverger : `os.ReadFile` relit le disque après le scan, donc une
+			// écriture arrivée entre les deux part sur le réseau sans que `disk[p]`
+			// la décrive. Deux lecteurs en dépendent, et pour la même raison -
+			// `preserveLocalEditIfAny` compare `disk == acceptes[rel]`, et la
+			// reconnaissance par chemin du pull (DAR-166) compare `acceptes[p]`
+			// à ce que le serveur renvoie. Les deux comparaisons n'ont de sens que
+			// contre le contenu réellement envoyé.
+			acceptes[p] = hashContent(content)
 			// Le chemin vient d'être accepté : il n'est plus hors périmètre. Cas
 			// réel, un fichier qui passe de binaire à texte (export réenregistré,
 			// `.png` remplacé par un `.md` au même nom). Laisser l'entrée ferait
@@ -1480,7 +1519,8 @@ func (e *Engine) pushLocal(base string, vu *scan) (map[string]string, error) {
 // peut pas produire.
 //
 // Ce que ça écarte, mesuré en revue adversariale : un fichier local tout neuf
-// (`Files` n'est écrit que par le pull et le rattrapage, jamais par le push), un
+// que le serveur n'a pas encore reconnu (depuis DAR-166, le pull le reconnaît
+// dès le cycle qui le pousse, quand le contenu renvoyé est bien le nôtre), un
 // chemin que `pushLocal` vient d'oublier après un conflit serveur, et - sur un
 // système de fichiers insensible à la casse - un chemin dont la clé du scan et
 // celle du serveur ne diffèrent que par la casse, qui serait sinon diagnostiqué
@@ -1623,6 +1663,47 @@ func (e *Engine) pull(base string, vu *scan, acceptes map[string]string) (map[st
 		}
 		abs := e.abs(ch.Path)
 		incoming := hashContent([]byte(ch.Content))
+
+		// DAR-166 : la preuve PAR CHEMIN que la réponse du push ne donne pas.
+		//
+		// Le défaut mesuré en production le 31/08 - six copies de conflit en huit
+		// minutes, toutes avec le motif « chemin non suivi » - vient de ce qu'un
+		// fichier créé sur ce poste n'entrait dans `Files` qu'au pull qui le
+		// redescend. Dans la fenêtre entre les deux, `refusDeReport` le juge non
+		// suivi, la garde de course n'est jamais évaluée, et une édition arrivée
+		// entre-temps devient une copie au lieu d'un report.
+		//
+		// La correction candidate de la spec - inscrire `Files[p]` au push, dans
+		// la branche `!res.Merged && !res.Conflict` - NE CORRIGE PAS ce défaut,
+		// et c'est le banc qui l'a montré avant qu'on la garde. `Merged` décrit
+		// l'ARBRE, pas le chemin : le serveur bascule en fusion 3-way dès que la
+		// base du client est derrière le head, c'est-à-dire dès qu'un autre
+		// fichier a bougé. Au banc, une simple création rend `merged=true`. La
+		// branche visée n'est donc presque jamais prise - et l'élargir mentirait,
+		// puisque sur une fusion `p` peut porter un mélange des deux côtés.
+		//
+		// Ici la question a une réponse exacte. `acceptes[p]` porte l'empreinte de
+		// ce que ce poste vient d'envoyer, `incoming` celle de ce que le serveur
+		// renvoie pour le même chemin au même cycle. Leur égalité PROUVE que le
+		// serveur retient notre contenu : exactement ce que `Files` affirme.
+		//
+		// Le marque-page va sur `resp.Head`, et c'est exact : ce head est lu après
+		// notre push et il porte le contenu qu'on vient de reconnaître. Ça ne
+		// rouvre pas la règle du 18/08 (« ne pas épingler le head sur un report »,
+		// 10 copies serveur en 12 cycles), qui vise le cas INVERSE : un chemin
+		// dont on n'a pas le contenu entrant. Ici on l'a, c'est nous qui l'avons
+		// envoyé.
+		//
+		// Seulement quand le chemin n'est pas encore suivi. Un chemin suivi mais
+		// sans marque-page est une autre décision, figée par ses propres tests.
+		if !ch.Deleted {
+			if envoye, prisCeCycle := acceptes[ch.Path]; prisCeCycle && envoye == incoming {
+				if _, suivi := e.state.Files[ch.Path]; !suivi {
+					e.state.Files[ch.Path] = incoming
+					e.noteVersion(ch.Path, resp.Head)
+				}
+			}
+		}
 
 		// COURSE, et seulement pour une ÉCRITURE entrante. Une SUPPRESSION venue
 		// du serveur passe par la branche `ch.Deleted` plus bas, qui tient déjà sa
@@ -2119,14 +2200,34 @@ func (e *Engine) reconcilePerimeter(paths []string, reportes map[string]bool) er
 		}
 		abs := e.abs(p)
 		if h, err := hashFile(abs); err == nil && h == known {
-			if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
-				return err
+			// DAR-199 : le fichier SORT du dossier de travail, il ne disparaît
+			// pas. Perdre l'accès n'est pas une suppression - le serveur garde le
+			// contenu, et rendre l'accès le fait revenir. Sans filet local,
+			// l'utilisateur du poste n'avait aucun moyen de le savoir pendant
+			// l'intervalle.
+			//
+			// Les quatre gardes au-dessus n'ont pas bougé : ce qui change est la
+			// DESTINATION du fichier, pas la décision de le retirer. La dernière
+			// (`h == known`) reste celle qui compte - un contenu que ce poste est
+			// seul à porter ne descend jamais jusqu'ici.
+			corbeille, err := e.alaCorbeille(p)
+			if err != nil {
+				// Le mode d'échec de ce lot ne peut pas être une suppression :
+				// aucun repli sur `os.Remove`. Le fichier reste en place, l'entrée
+				// reste dans l'état, et le cycle suivant réessaiera.
+				e.laisseServeur(p, "sorti du périmètre mais non mis en corbeille : "+err.Error()+
+					" (le fichier reste à sa place sur ce poste)")
+				continue
 			}
 			removeEmptyParents(e.dir, abs)
 			e.oublie(p)
-			e.logf("retiré %s (hors périmètre)", p)
+			// Le chemin de reprise en entier, pour que ce soit un copier-coller et
+			// pas une chasse. C'est la seule interface de restauration de ce lot,
+			// et elle doit donc se suffire.
+			e.logf("retiré %s (hors périmètre) — mis en corbeille : %s", p, corbeille)
 		}
 	}
+	e.purgeCorbeille()
 	return nil
 }
 

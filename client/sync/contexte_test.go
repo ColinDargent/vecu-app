@@ -484,6 +484,9 @@ func TestContexteNeRepetePasLaLigneDeJournal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows ne supprime pas un fichier ouvert : sans ce relâchement, le
+	// nettoyage de t.TempDir() échoue sur .vecu/lock. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = e.Close() })
 	e.Importer([]string{"equipe"})
 	writeFile(t, dir, "equipe/"+FichierContexteClaude, "# Carte\n")
 

@@ -10,6 +10,7 @@
   .arbre a:hover .etat { color: inherit; }
   .arbre .etat { margin-left: auto; font-family: var(--sans); font-size: 11px; color: var(--encre-douce); }
   .arbre .direct { font-weight: 700; color: var(--alerte); }
+  .arbre .createur { font-family: var(--mono); }
   .arbre a:hover .direct { color: var(--accent-encre); }
   /* Les panneaux de droite s'empilent DANS la colonne. Sans cette pile, le
      second devient un troisième élément de la grille `.colonnes` et retombe
@@ -28,6 +29,9 @@
   .membre { padding: .35rem 0; border-bottom: 1px solid var(--trait-fin); }
   .membre:last-of-type { border-bottom: 0; }
   .membre .qui { font-family: var(--mono); font-size: 12.5px; display: block; margin-bottom: .2rem; }
+  /* L'origine se lit sous le nom, pas a cote : elle ne doit pas pousser les
+     boutons hors de leur position d'une ligne a l'autre. */
+  .membre .origine { font-family: var(--sans); display: block; font-size: 11.5px; margin-top: .1rem; }
   .membre .boutons { display: flex; }
   .membre .boutons form { display: inline; margin: 0; }
   .membre .boutons button { font-size: 11.5px; padding: .2rem .45rem; }
@@ -47,6 +51,10 @@
   .membre .liste-internes li { font-size: 11px; line-height: 1.55; }
   .membre details.internes p { margin: .3rem 0 0; font-size: 11.5px; color: var(--encre-douce); }
   .fil { font-family: var(--mono); font-size: 12.5px; }
+  /* La liste des cohortes qui portent ce dossier : sans puces ni retrait, dans
+     un panneau de 19rem où l'un et l'autre mangent la moitié de la largeur. */
+  .cohortes-du-dossier { list-style: none; margin: .2rem 0 .6rem; padding: 0; font-size: 12.5px; }
+  .cohortes-du-dossier li { padding: .1rem 0; }
 </style>
 
 <p class="fil"><a href="/admin/">Dossiers</a>{{range .Fil}} / <a href="{{.Href}}">{{.Nom}}</a>{{end}}</p>
@@ -54,7 +62,10 @@
 <div class="colonnes">
   <div>
     <h1>{{if .Chemin}}{{.Chemin}}{{else}}Tous les dossiers{{end}}</h1>
-    <p class="discret">{{len .Entrees}} entrée{{if gt (len .Entrees) 1}}s{{end}} visible{{if gt (len .Entrees) 1}}s{{end}}{{if .Chemin}} · votre accès : {{.Niveau}}{{end}}</p>
+    <p class="discret">{{len .Entrees}} entrée{{if gt (len .Entrees) 1}}s{{end}} visible{{if gt (len .Entrees) 1}}s{{end}}{{if .Chemin}} · votre accès : {{.Niveau}}{{end}}
+{{if .AuMoinsUnCreateur}}
+    · à droite de chaque ligne : <b>créé par</b>, puis votre accès. Pour un dossier, c'est qui a
+    créé le plus ancien des fichiers <b>que vous voyez</b> dedans.{{end}}</p>
     {{if .Entrees}}
     <div class="arbre">
       {{range .Entrees}}
@@ -64,7 +75,11 @@
         {{/* La surcharge est signalée LÀ OÙ ELLE AGIT. Avant, elle vivait en
              avertissement rouge sur un autre écran, et rien ne la montrait
              pendant qu'on naviguait. */}}
-        <span class="etat">{{if .Direct}}<span class="direct">règle directe</span> · {{.Niveau}}{{else}}hérité · {{.Niveau}}{{end}}</span>
+        {{/* QUI A POSE CA LA. Le mainteneur qui tombe sur un dossier qu'il ne
+             reconnaît pas ouvrait un terminal pour le savoir. La colonne est
+             muette quand l'historique ne répond pas : mieux vaut ne rien dire
+             que dire « inconnu », qui se lit comme une anomalie. */}}
+        <span class="etat">{{if .Createur}}<span class="createur">{{.Createur}}</span> · {{end}}{{if .Direct}}<span class="direct">règle directe</span> · {{.Niveau}}{{else}}hérité · {{.Niveau}}{{end}}</span>
       </a>
       {{end}}
     </div>
@@ -82,7 +97,8 @@
       {{range .Membres}}
       {{$membre := .}}
       <div class="membre">
-        <span class="qui">{{.Username}}{{if .IsAdmin}} <span class="discret">(admin)</span>{{end}}</span>
+        <span class="qui">{{.Username}}{{if .IsAdmin}} <span class="discret">(admin)</span>{{end}}
+          <span class="discret origine">{{.Origine}}</span></span>
         <span class="boutons">
           {{range $.Niveaux}}
           <form method="post" action="/admin/dossiers/acces">
@@ -161,25 +177,25 @@
       le rouvre à qui de droit.{{else}}Sans défaut, ce dossier suit le niveau par défaut de chaque
       compte. Poser un défaut ici le referme pour tous d'un geste, une fois pour toutes.{{end}}</p>
 
+      {{/* EN LECTURE depuis le 02/09, et la surface autoritaire a DÉMÉNAGÉ.
+           Elle était ici ; elle est maintenant sur la cohorte, qui est l'objet
+           dont on part vraiment - « l'équipe contenu, voilà ses dossiers » -
+           plutôt que le dossier dont on se demanderait qui y entre.
+           L'invariant, lui, ne bouge pas : une seule surface écrit, sans quoi
+           deux écrans laissés ouverts s'écrasent l'un l'autre. */}}
       {{if .Cohortes}}
-      <form method="post" action="/admin/dossiers/cohortes">
-        <input type="hidden" name="chemin" value="{{.Chemin}}">
-        <div class="liste-skills">
-          {{range .Cohortes}}
-          <label class="choix">
-            <input type="checkbox" name="groupe_id" value="{{.ID}}"{{if .Dedans}} checked{{end}}>
-            <span>{{.Nom}}</span>
-          </label>
-          {{end}}
-        </div>
-        <p class="discret">Les membres d'une cohorte cochée reçoivent ce dossier au niveau que
-        la cohorte leur donne. Une cohorte OUVRE : si deux d'entre elles se contredisent, c'est
-        le niveau le plus large qui s'applique, ici comme sur les dossiers du dessous.</p>
-        <button>Enregistrer</button>
-      </form>
+      <p class="discret">Cohortes qui portent ce dossier :</p>
+      <ul class="cohortes-du-dossier">
+        {{range .Cohortes}}{{if .Dedans}}
+        <li><a href="/admin/cohortes#groupe-{{.ID}}">{{.Nom}}</a></li>
+        {{end}}{{end}}
+      </ul>
+      <p class="discret">Les membres d'une cohorte reçoivent ce dossier au niveau qu'elle leur
+      donne. Une cohorte OUVRE : si deux d'entre elles se contredisent, c'est le niveau le plus
+      large qui s'applique. Le rangement se fait <a href="/admin/cohortes">sur la cohorte</a>.</p>
       {{else}}
-      <p class="discret">Aucune cohorte pour l'instant. Elles se créent depuis
-      <a href="/admin/skills#groupes">la page des skills</a>, et servent aussi bien aux dossiers.</p>
+      <p class="discret">Aucune cohorte pour l'instant. Elles se créent
+      <a href="/admin/cohortes">sur leur page</a>, et portent aussi bien des dossiers que des skills.</p>
       {{end}}
     </div>
   </aside>

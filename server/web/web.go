@@ -13,6 +13,8 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/colindargent/vecu/server/db"
 	"github.com/colindargent/vecu/server/perms"
@@ -28,6 +30,9 @@ type Server struct {
 	// les émet depuis l'app, cette porte les consomme. Nil = /admin/entrer se
 	// comporte comme un billet invalide, donc renvoie au formulaire.
 	Tickets *tickets.Store
+	// Now : horloge injectable, pour que le rendu des dates relatives des
+	// jetons soit testable. Nil = time.Now.
+	Now func() time.Time
 }
 
 const sessionCookie = "vecu_session"
@@ -38,7 +43,7 @@ var templatesFS embed.FS
 // pages : un template par page, chacun composé avec le layout.
 var pages = func() map[string]*template.Template {
 	out := map[string]*template.Template{}
-	for _, name := range []string{"login", "accueil", "users", "droits", "skills", "dossiers", "fichier", "historique"} {
+	for _, name := range []string{"login", "accueil", "users", "droits", "skills", "cohortes", "dossiers", "fichier", "historique", "jetons", "etat"} {
 		out[name] = template.Must(template.ParseFS(templatesFS,
 			"templates/layout.html", "templates/"+name+".html"))
 	}
@@ -60,17 +65,28 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /admin/dossiers", s.session(s.handleDossiers))
 	mux.HandleFunc("GET /admin/dossiers/{path...}", s.session(s.handleDossiers))
 	mux.HandleFunc("POST /admin/dossiers/acces", s.admin(s.handleSetAcces))
-	mux.HandleFunc("POST /admin/dossiers/cohortes", s.admin(s.handleSetCohortes))
 	mux.HandleFunc("POST /admin/dossiers/defaut", s.admin(s.handleSetDefautDossier))
+	mux.HandleFunc("POST /admin/dossiers/espaces/supprimer", s.admin(s.handleSupprimerEspace))
+	mux.HandleFunc("POST /admin/fichier/supprimer", s.session(s.handleSupprimerFichier))
 	// Les adresses d'avant restent servies : elles sont dans des favoris, dans
 	// l'historique des navigateurs, et dans le menu de l'app de bureau.
+	// L'écran du mainteneur (DAR-198). PAS sur /admin/fichiers, qui sert une
+	// redirection posée pour les favoris : qui l'a en favori voulait PARCOURIR
+	// des fichiers, pas lire un tableau de santé. Deux besoins, deux adresses.
+	mux.HandleFunc("GET /admin/etat", s.admin(s.handleEtatFichiers))
 	mux.HandleFunc("GET /admin/fichiers", redirigeVers("/admin/dossiers"))
 	mux.HandleFunc("GET /admin/fichiers/{path...}", s.redirigeFichiers)
 	mux.HandleFunc("GET /admin/espaces", redirigeVers("/admin/"))
 	mux.HandleFunc("GET /admin/conflits", redirigeVers("/admin/"))
 	mux.HandleFunc("GET /admin/historique/{path...}", s.session(s.handleHistorique))
 	mux.HandleFunc("POST /admin/restaurer/{path...}", s.session(s.handleRestaurer))
-	mux.HandleFunc("GET /admin/export.zip", s.session(s.handleExportZip))
+	// L'EXPORT EST UN OUTIL D'ADMINISTRATION (Colin, 01/09). Il servait deux
+	// publics avec deux règles - le périmètre du lecteur pour un non-admin, tout
+	// le dépôt pour un admin - donc son exemption ressemblait à une fuite alors
+	// qu'elle est la fonction même de l'outil. Réservé aux administrateurs, elle
+	// redevient lisible. La porte API `GET /export` n'est PAS touchée ici : elle
+	// est hors du périmètre de ce lot.
+	mux.HandleFunc("GET /admin/export.zip", s.admin(s.handleExportZip))
 	// Lecture ouverte à tout compte : chacun voit les skills que le résolveur lui
 	// accorde, et rien d'autre (cf. skillsDuDepot, qui part de SES règles). Sans
 	// ça, la délégation « le créateur gère son skill » (F3) n'a aucune surface :
@@ -93,17 +109,34 @@ func (s *Server) Handler() http.Handler {
 	// Les groupes : créer, supprimer et régler les membres est réservé aux
 	// administrateurs. RANGER un skill est ouvert à son créateur aussi, donc
 	// c'est le handler qui tranche, pas le middleware.
+	// LES COHORTES ONT LEUR PROPRE ECRAN (DAR-196, 01/09). Elles vivaient dans
+	// un encart de l'ecran des skills, qui parle d'autre chose : le concept que
+	// l'administration doit avoir au centre etait un reglage d'une page voisine.
+	// Les anciennes adresses restent servies, elles sont dans des favoris.
+	mux.HandleFunc("GET /admin/cohortes", s.admin(s.handleCohortes))
+	mux.HandleFunc("POST /admin/cohortes", s.admin(s.handleCreerGroupe))
+	mux.HandleFunc("POST /admin/cohortes/supprimer", s.admin(s.handleSupprimerGroupe))
+	mux.HandleFunc("POST /admin/cohortes/membres", s.admin(s.handleSetMembresGroupe))
+	mux.HandleFunc("POST /admin/cohortes/modifier", s.admin(s.handleModifierGroupe))
+	mux.HandleFunc("POST /admin/cohortes/niveau-chemin", s.admin(s.handleSetNiveauChemin))
+	mux.HandleFunc("POST /admin/cohortes/retirer-chemin", s.admin(s.handleRetirerChemin))
 	mux.HandleFunc("POST /admin/skills/groupes", s.admin(s.handleCreerGroupe))
 	mux.HandleFunc("POST /admin/skills/groupes/supprimer", s.admin(s.handleSupprimerGroupe))
 	mux.HandleFunc("POST /admin/skills/groupes/membres", s.admin(s.handleSetMembresGroupe))
 	mux.HandleFunc("POST /admin/skills/groupes/modifier", s.admin(s.handleModifierGroupe))
 	mux.HandleFunc("POST /admin/skills/ranger", s.session(s.handleRangerSkill))
+	// Les jetons MCP : chaque compte gère les siens, donc `session` et pas
+	// `admin`. Créer un jeton pour soi n'accorde aucun droit qu'on n'a pas.
+	mux.HandleFunc("GET /admin/jetons", s.session(s.handleJetons))
+	mux.HandleFunc("POST /admin/jetons", s.session(s.handleCreerJeton))
+	mux.HandleFunc("POST /admin/jetons/revoquer", s.session(s.handleRevoquerJeton))
 	mux.HandleFunc("GET /admin/users", s.admin(s.handleUsers))
 	mux.HandleFunc("POST /admin/users", s.admin(s.handleCreateUser))
 	mux.HandleFunc("GET /admin/users/{id}", s.admin(s.handleDroits))
 	mux.HandleFunc("POST /admin/users/{id}/defaut", s.admin(s.handleSetDefaut))
 	mux.HandleFunc("POST /admin/users/{id}/droits", s.admin(s.handleSetDroit))
 	mux.HandleFunc("POST /admin/users/{id}/droits/supprimer", s.admin(s.handleSupprimerDroit))
+	mux.HandleFunc("POST /admin/users/{id}/fermer", s.admin(s.handleFermerCompte))
 	return mux
 }
 
@@ -147,6 +180,7 @@ func render(w http.ResponseWriter, status int, page string, data any) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// Jamais de HTML authentifié en cache (proxy, bfcache après logout).
 	w.Header().Set("Cache-Control", "no-store")
+	entetesDurcies(w)
 	w.WriteHeader(status)
 	buf.WriteTo(w)
 }
@@ -155,7 +189,47 @@ func render(w http.ResponseWriter, status int, page string, data any) {
 // (une 404/500 authentifiée ne doit pas plus être cachée qu'une page).
 func erreurHTTP(w http.ResponseWriter, msg string, status int) {
 	w.Header().Set("Cache-Control", "no-store")
+	entetesDurcies(w)
 	http.Error(w, msg, status)
+}
+
+// entetesDurcies : AUCUNE REQUETE RESEAU SORTANTE DEPUIS UNE PAGE SERVIE.
+//
+// C'est une contrainte que le produit s'était déjà donnée pour ses propres
+// ressources - le layout n'utilise que des polices système, et son commentaire
+// dit pourquoi : « une police distante serait une requête réseau sortante
+// depuis une page servie ». Le rendu markdown ouvrait cette porte en grand, et
+// à un TIERS : `![](https://tracker.example/p.png)` dans une note, et le
+// navigateur de l'administrateur va la chercher tout seul à l'ouverture de la
+// page. Sans une ligne de script, ça donne à l'auteur de la note un accusé de
+// lecture horodaté, l'IP et l'agent de l'administrateur ; et
+// `![](http://192.168.1.1/x.png)` fait du navigateur une sonde du réseau
+// interne, depuis l'intérieur du périmètre.
+//
+// `img-src 'none'` ne coûte RIEN aujourd'hui : aucun template n'utilise
+// `<img>` (les icônes sont des `<svg>` en ligne), et le serveur n'expose aucune
+// route qui servirait le contenu d'un fichier - une image de note ne pourrait
+// donc pas s'afficher de toute façon. Un lien reste cliquable : une navigation
+// est un geste de l'administrateur, pas une requête que la page déclenche.
+//
+// `'unsafe-inline'` sur le style et le script est ce que le produit EST : un
+// binaire unique qui embarque ses templates, avec son style et son script dans
+// le layout. La directive ne prétend donc pas se protéger d'une injection dans
+// la page ; c'est `WithUnsafe` qui reste interdit pour ça. Elle ferme les
+// requêtes sortantes, et `frame-ancestors` le détournement de clic.
+// Source: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Content-Security-Policy
+func entetesDurcies(w http.ResponseWriter) {
+	w.Header().Set("Content-Security-Policy", strings.Join([]string{
+		"default-src 'none'",
+		"img-src 'none'",
+		"style-src 'unsafe-inline'",
+		"script-src 'unsafe-inline'",
+		"form-action 'self'",
+		"frame-ancestors 'none'",
+		"base-uri 'none'",
+	}, "; "))
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 }
 
 // sessionUser résout l'utilisateur depuis le cookie de session, ou nil.
@@ -209,7 +283,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "erreur interne", http.StatusInternalServerError)
 		return
 	}
-	token, err := s.DB.IssueToken(u.ID, "web")
+	token, err := s.DB.IssueToken(u.ID, db.LabelSessionWeb)
 	if err != nil {
 		http.Error(w, "erreur interne", http.StatusInternalServerError)
 		return
@@ -250,7 +324,7 @@ func (s *Server) handleEntrer(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin/login", http.StatusSeeOther)
 		return
 	}
-	token, err := s.DB.IssueToken(u.ID, "web")
+	token, err := s.DB.IssueToken(u.ID, db.LabelSessionWeb)
 	if err != nil {
 		http.Error(w, "erreur interne", http.StatusInternalServerError)
 		return

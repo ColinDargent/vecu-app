@@ -3,6 +3,7 @@ package sync
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -43,6 +44,12 @@ func TestPreAnalyseAnnonceAvant(t *testing.T) {
 // pas « il n'y a rien ». Annoncer « 2 fichiers partiront » sur un dossier dont
 // la moitié était illisible serait un mensonge par omission.
 func TestUnDossierIllisibleNeSAnnoncePasVide(t *testing.T) {
+	// Précondition : un dossier illisible par bit de permission Unix, que Windows
+	// ne porte pas. Ce que ça laisse découvert là-bas : l'annonce « analyse
+	// incomplète » quand un parcours échoue. Noté dans spec-port-windows.md.
+	if runtime.GOOS == "windows" {
+		t.Skip("précondition = dossier illisible par permission Unix, sans effet sur Windows")
+	}
 	dossier := t.TempDir()
 	ecris(t, dossier, "visible.md", "texte\n")
 	interdit := filepath.Join(dossier, "ferme")
@@ -97,6 +104,11 @@ func TestGardeBloquanteSurUnEspaceDejaMonte(t *testing.T) {
 func TestGardeBloquanteSurLeHome(t *testing.T) {
 	maison := t.TempDir()
 	t.Setenv("HOME", maison)
+	// os.UserHomeDir lit %USERPROFILE% sur Windows et non HOME : sans cette
+	// ligne, le test lisait le VRAI dossier personnel. Mesuré en CI le 06/09.
+	t.Setenv("USERPROFILE", maison)
+	t.Setenv("AppData", filepath.Join(maison, "AppData", "Roaming"))
+	t.Setenv("LocalAppData", filepath.Join(maison, "AppData", "Local"))
 	e := &Engine{dir: t.TempDir(), logf: func(string, ...any) {}}
 	if a := e.PreAnalyse(maison); !a.Refuse() {
 		t.Errorf("le dossier personnel entier n'a pas été refusé : %+v", a.Gardes)
@@ -206,5 +218,33 @@ func ecrisOctets(t *testing.T, dir, rel string, b []byte) {
 	}
 	if err := os.WriteFile(abs, b, 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestSynchroniseurTiersReconnaitUnCheminWindows : la garde doit parler quel que
+// soit le séparateur.
+//
+// Elle était MUETTE sur Windows jusqu'au 06/09 : les motifs sont écrits avec des
+// barres obliques et un chemin Windows n'en contient aucune. Or OneDrive est
+// présent par défaut sur presque toutes les machines Windows, et le dossier
+// « Documents » y est souvent redirigé sans que la personne le sache - c'est
+// exactement le cas où deux synchroniseurs se disputent les mêmes fichiers.
+//
+// Le test tourne sur les DEUX systèmes : il passe des chemins Windows littéraux,
+// que `ToSlash` ramène à la forme des motifs indépendamment de l'OS hôte.
+func TestSynchroniseurTiersReconnaitUnCheminWindows(t *testing.T) {
+	cas := []struct {
+		chemin string
+		veut   string
+	}{
+		{`C:\Users\colin\OneDrive\vault`, "OneDrive"},
+		{`C:\Users\colin\Dropbox\second-brain`, "Dropbox"},
+		{`C:\Users\colin\Google Drive\x`, "Google Drive"},
+		{`C:\Users\colin\Documents\vault`, ""},
+	}
+	for _, c := range cas {
+		if got := synchroniseurTiers(c.chemin); got != c.veut {
+			t.Errorf("synchroniseurTiers(%q) = %q, veut %q", c.chemin, got, c.veut)
+		}
 	}
 }

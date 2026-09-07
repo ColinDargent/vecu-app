@@ -220,7 +220,13 @@ func TestRenderDroitsArbreScopeAdmin(t *testing.T) {
 	if !strings.Contains(body, ">acme/") {
 		t.Errorf("l'arbre devrait montrer acme/ (lisible par l'admin appelant)")
 	}
-	if strings.Contains(body, ">vdf/") {
-		t.Errorf("l'arbre expose vdf/, hors du périmètre de lecture de l'admin appelant")
+	// L'ARBRE MONTRE AUSSI vdf/, et c'est le renversement de DAR-196 (01/09).
+	// Deux des six portes d'ecriture vivent sur cet ecran (`/droits` et
+	// `/droits/supprimer`) : le laisser filtre par le perimetre de LECTURE de
+	// l'admin appelant y rouvrait l'enfermement corrige un ecran plus tot. Un
+	// administrateur qui ne voit pas un dossier sur la fiche d'un compte ne peut
+	// pas y regler les droits de ce compte.
+	if !strings.Contains(body, ">vdf/") {
+		t.Errorf("l'arbre devrait montrer vdf/ : un admin administre ce qu'il s'est ferme")
 	}
 }

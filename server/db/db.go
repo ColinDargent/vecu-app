@@ -115,7 +115,28 @@ CREATE TABLE IF NOT EXISTS meta (
 	if err := d.migreGroupes(); err != nil {
 		return err
 	}
-	_, err = d.sql.Exec(schemaGroupes)
+	if _, err := d.sql.Exec(schemaGroupes); err != nil {
+		return err
+	}
+	// APRES la creation du schema : `CREATE TABLE IF NOT EXISTS` ne touche pas
+	// une table deja la, donc une base d'avant le 01/09 n'aurait jamais la
+	// colonne ; et sur une base neuve la table n'existe qu'ici.
+	if err := d.migreNiveauDeChemin(); err != nil {
+		return err
+	}
+	// APRES `migreNiveauDeChemin` : la scission des cohortes mixtes déplace des
+	// lignes de `groupe_chemins`, et elle doit les déplacer AVEC leur niveau.
+	if err := d.migreGenreDeGroupe(); err != nil {
+		return err
+	}
+	// Additive et sans dépendance : la table des jetons MCP ne référence que
+	// `users`, déjà créée plus haut. Aucun renommage, aucune donnée transformée.
+	if _, err := d.sql.Exec(schemaMCP); err != nil {
+		return err
+	}
+	// Additive et sans dépendance elle aussi : `postes_etat` ne référence que
+	// `device_tokens`, créée tout en haut. Voir `postes.go`.
+	_, err = d.sql.Exec(schemaPostes)
 	return err
 }
 
@@ -151,6 +172,36 @@ func (d *DB) colonneExiste(table, col string) (bool, error) {
 // à la main y est indiscernable du défaut, et referme de toute façon la même
 // chose : le seul écart possible est qu'une cohorte puisse désormais le rouvrir,
 // ce qui est précisément ce que Q2 a voulu.
+// migreNiveauDeChemin ajoute `groupe_chemins.level` (01/09, DAR-196).
+//
+// CE QU'ELLE DEBLOQUE. Une cohorte portait des chemins SANS niveau, le niveau
+// vivant sur le membre : elle appliquait donc un seul niveau a tous ses
+// chemins, et ne savait pas dire « lecture sur shared/, invisible sur
+// shared/direction ». Un utilisateur, lui, sait le dire depuis toujours. C'est
+// cette asymetrie que la colonne supprime.
+//
+// LE DEFAUT VIDE EST LE COMPORTEMENT D'AVANT : un chemin sans niveau prend
+// celui du membre, exactement comme avant la colonne. La migration ne peut donc
+// changer le droit de personne, et c'est ce qui la rend jouable sur une base de
+// production sans fenetre d'arret.
+//
+// Pas de contrainte CHECK sur la colonne, et c'est mesure : « When adding a
+// column with a CHECK constraint [...] the added constraints are tested against
+// all preexisting rows and the ADD COLUMN fails if any constraint fails. » Une
+// valeur invalide en base est deja refusee a l'ecriture par ParseLevel.
+// Source: https://www.sqlite.org/lang_altertable.html#altertabaddcol
+func (d *DB) migreNiveauDeChemin() error {
+	existe, err := d.colonneExiste("groupe_chemins", "level")
+	if err != nil || existe {
+		return err
+	}
+	if _, err := d.sql.Exec(
+		`ALTER TABLE groupe_chemins ADD COLUMN level TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("migration du niveau par chemin de cohorte : %w", err)
+	}
+	return nil
+}
+
 func (d *DB) migreOrigine() error {
 	existe, err := d.colonneExiste("permissions", "origine")
 	if err != nil || existe {
@@ -206,6 +257,11 @@ CREATE TABLE IF NOT EXISTS groupe_chemins (
   chemin    TEXT NOT NULL,
   genre     TEXT NOT NULL,
   slug      TEXT NOT NULL DEFAULT '',
+  -- level : le niveau que la cohorte accorde SUR CE CHEMIN. Vide = le chemin
+  -- prend le niveau du membre, qui etait le seul comportement avant le 01/09.
+  -- C'est ce qui permet a une cohorte de dire « lecture sur shared/, invisible
+  -- sur shared/direction », ce qu'un utilisateur savait deja dire.
+  level     TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (groupe_id, chemin),
   CHECK ((genre = 'skill' AND slug <> '') OR (genre = 'dossier' AND slug = ''))
 );
@@ -830,11 +886,44 @@ func (d *DB) SetPermission(userID int64, path string, level perms.Level) error {
 
 // Rules charge toutes les règles d'un utilisateur (pour resolution perms).
 func (d *DB) Rules(userID int64) ([]perms.Rule, error) {
+	regles, _, err := d.reglesEtOrigines(userID)
+	return regles, err
+}
+
+// ReglesEtOrigines : les mêmes règles, avec le barreau qui a produit chacune.
+//
+// Exposé le 02/09 pour la fiche d'un compte. `Rules` jetait les origines depuis
+// toujours, alors que la résolution les calcule de toute façon : l'écran qui
+// demande « pourquoi cette personne voit ça » n'avait donc pas de réponse, sur
+// le seul écran où la question se pose vraiment.
+//
+// Les deux tranches sont PARALLÈLES, index par index. C'est le contrat que
+// `reglesEtOrigines` tient déjà en émettant les deux dans la même boucle triée.
+func (d *DB) ReglesEtOrigines(userID int64) ([]perms.Rule, []Origine, error) {
+	return d.reglesEtOrigines(userID)
+}
+
+// Origine : le barreau de l'echelle qui a produit un droit, en clair.
+//
+// L'ECRAN DOIT DIRE D'OU VIENT UN DROIT, pas seulement lequel il est. Sans ca,
+// le mainteneur voit « Marie : lecture » et ne peut pas savoir s'il doit
+// toucher la regle de Marie, sa cohorte, le defaut du dossier ou le defaut de
+// son compte - donc il tatonne, et il tatonne sur des droits.
+type Origine struct {
+	// Barreau : "exception", "cohorte", "defaut", "dossier", ou "compte" quand
+	// aucune regle ne couvre le chemin et que le defaut du compte s'applique.
+	Barreau string
+	// Cohorte : le nom de celle qui a gagne, quand Barreau vaut "cohorte".
+	Cohorte string
+}
+
+// reglesEtOrigines : les regles, ET le barreau qui a produit chacune.
+func (d *DB) reglesEtOrigines(userID int64) ([]perms.Rule, []Origine, error) {
 	// ORDER BY path : résolution déterministe indépendante de l'ordre des rowids.
 	rows, err := d.sql.Query(
 		`SELECT path, level, origine FROM permissions WHERE user_id = ? ORDER BY path`, userID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 	exceptions := map[string]perms.Level{}
@@ -842,11 +931,11 @@ func (d *DB) Rules(userID int64) ([]perms.Rule, error) {
 	for rows.Next() {
 		var p, l, origine string
 		if err := rows.Scan(&p, &l, &origine); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		lvl, ok := perms.ParseLevel(l)
 		if !ok {
-			return nil, fmt.Errorf("niveau stocké invalide : %q", l)
+			return nil, nil, fmt.Errorf("niveau stocké invalide : %q", l)
 		}
 		// Canon À L'ÉMISSION, pas seulement dans la clé du masque. La clé
 		// primaire de `permissions` porte la chaîne BRUTE : deux lignes
@@ -862,7 +951,7 @@ func (d *DB) Rules(userID int64) ([]perms.Rule, error) {
 		exceptions[c] = lvl
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// LES GROUPES SONT INJECTÉS ICI, et pas appris à perms.Effective. Le
@@ -914,37 +1003,54 @@ func (d *DB) Rules(userID int64) ([]perms.Rule, error) {
 	// automatique ajouté plus tard.
 	groupes, err := d.reglesDeGroupe(userID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	// Étape 1 : le niveau le plus fort qu'une cohorte accorde sur CE chemin exact.
-	brut := make(map[string]perms.Level, len(groupes))
+	// LA RÉSOLUTION SE FAIT EN DEUX TEMPS, ET L'ORDRE EST TOUT (01/09).
+	//
+	// Étape 1, DANS chaque cohorte : le chemin le plus PROFOND gagne. Une
+	// cohorte qui porte `shared` en lecture et `shared/direction` en invisible
+	// exclut `shared/direction`, parce que la ligne profonde est une exclusion
+	// VOULUE par celui qui l'a posée. C'est ce que la colonne `level` a rendu
+	// exprimable, et c'est le geste que l'écran des cohortes propose.
+	//
+	// Étape 2, ENTRE les cohortes : le plus PERMISSIF gagne. Inscrire quelqu'un
+	// dans une deuxième cohorte ne doit jamais lui retirer un accès (25/08, Q1).
+	//
+	// L'ANCIENNE VERSION FONDAIT LES DEUX EN UNE, en repliant sur les ancêtres
+	// après avoir mélangé toutes les cohortes dans une map par chemin. Elle
+	// n'avait rien à perdre tant qu'une cohorte portait UN niveau pour tous ses
+	// chemins ; depuis que le chemin porte le sien, elle annulait l'exclusion
+	// profonde par le niveau de la racine de la même cohorte, et la fonction
+	// serait née morte.
+	parCohorte := map[int64][]perms.Rule{}
+	interessants := map[string]bool{}
 	for _, r := range groupes {
 		c := perms.Canon(r.Path)
-		if niveau, vu := brut[c]; !vu || r.Level > niveau {
-			brut[c] = r.Level
-		}
+		parCohorte[r.GroupeID] = append(parCohorte[r.GroupeID], perms.Rule{Path: c, Level: r.Level})
+		interessants[c] = true
 	}
-	// Étape 2 : LE REPLI SUR LES ANCÊTRES. Une cohorte qui porte `clients`
-	// accorde son niveau à tout ce qui est dessous, `clients/acme` compris. Sans
-	// cette étape, une cohorte portant `clients/acme` en lecture referme ce
-	// qu'une cohorte portant `clients` ouvrait en écriture - le plus profond
-	// gagnerait dans perms.Effective.
-	//
-	// On remonte les ancêtres du chemin plutôt que de croiser tous les couples :
-	// les chemins qui couvrent `c` sont exactement `c` et ses ancêtres par
-	// segment, c'est la définition de `covers` dans perms. O(chemins ×
-	// profondeur) au lieu de O(chemins²), et le résolveur n'apprend rien.
-	cohortes := make(map[string]perms.Level, len(brut))
-	for c, meilleur := range brut {
-		for a := parentDe(c); ; a = parentDe(a) {
-			if niveau, vu := brut[a]; vu && niveau > meilleur {
-				meilleur = niveau
+	cohortes := make(map[string]perms.Level, len(interessants))
+	gagnante := make(map[string]int64, len(interessants))
+	for c := range interessants {
+		premier := true
+		var meilleur perms.Level
+		var quelle int64
+		for gid, regles := range parCohorte {
+			niveau, couvre := niveauDeCohorte(c, regles)
+			if !couvre {
+				// Une cohorte qui ne couvre pas ce chemin ne dit RIEN dessus.
+				// La faire voter `invisible` lui ferait fermer ce qu'une autre
+				// ouvre, ce que le barreau 2 interdit.
+				continue
 			}
-			if a == "" {
-				break
+			if premier || niveau > meilleur {
+				meilleur, quelle, premier = niveau, gid, false
 			}
 		}
-		cohortes[c] = meilleur
+		if !premier {
+			cohortes[c] = meilleur
+			gagnante[c] = quelle
+		}
 	}
 
 	// Émission : un passage, un seul append par chemin, dans l'ordre trié.
@@ -954,7 +1060,7 @@ func (d *DB) Rules(userID int64) ([]perms.Rule, error) {
 	// Source: https://go.dev/blog/maps
 	defautsDossier, err := d.DefautsDossiers()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	tous := make(map[string]bool, len(exceptions)+len(defauts)+len(cohortes)+len(defautsDossier))
 	for c := range exceptions {
@@ -975,20 +1081,103 @@ func (d *DB) Rules(userID int64) ([]perms.Rule, error) {
 	}
 	sort.Strings(chemins)
 
+	noms, err := d.nomsDesGroupes()
+	if err != nil {
+		return nil, nil, err
+	}
 	out := make([]perms.Rule, 0, len(chemins))
+	origines := make([]Origine, 0, len(chemins))
 	for _, c := range chemins {
 		switch {
 		case estDans(exceptions, c):
 			out = append(out, perms.Rule{Path: c, Level: exceptions[c]})
+			origines = append(origines, Origine{Barreau: "exception"})
 		case estDans(cohortes, c):
 			out = append(out, perms.Rule{Path: c, Level: cohortes[c]})
+			origines = append(origines, Origine{Barreau: "cohorte", Cohorte: noms[gagnante[c]]})
 		case estDans(defauts, c):
 			out = append(out, perms.Rule{Path: c, Level: defauts[c]})
+			origines = append(origines, Origine{Barreau: "defaut"})
 		default:
 			out = append(out, perms.Rule{Path: c, Level: defautsDossier[c]})
+			origines = append(origines, Origine{Barreau: "dossier"})
 		}
 	}
+	return out, origines, nil
+}
+
+func (d *DB) nomsDesGroupes() (map[int64]string, error) {
+	groupes, err := d.ListGroupes()
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[int64]string, len(groupes))
+	for _, g := range groupes {
+		out[g.ID] = g.Nom
+	}
 	return out, nil
+}
+
+// DroitAvecOrigine : le droit effectif d'un compte sur un chemin, ET le barreau
+// qui l'a produit.
+//
+// Meme depart que perms.Effective - la regle couvrante la plus PROFONDE gagne,
+// le plus restrictif a profondeur egale - parce que rendre une origine qui ne
+// correspond pas au droit affiche a cote serait pire que ne rien dire.
+func (d *DB) DroitAvecOrigine(u *User, chemin string) (perms.Level, Origine, error) {
+	r, err := d.ResolveurDe(u)
+	if err != nil {
+		return perms.Invisible, Origine{}, err
+	}
+	niveau, origine := r.Droit(chemin)
+	return niveau, origine, nil
+}
+
+// Resolveur : les règles d'UN compte, chargées une fois, interrogeables autant
+// de fois qu'on veut sans retoucher la base.
+//
+// POURQUOI IL EXISTE. `DroitAvecOrigine` lance une requête SQL à chaque appel,
+// ce qui va très bien pour la fiche d'un compte - un chemin, un compte. L'écran
+// du mainteneur (DAR-198), lui, demande le droit de CHAQUE compte sur CHAQUE
+// fichier : 1186 x 12 = 14 232 requêtes, et 645 ms mesurés au banc de DAR-195
+// contre un seuil de 140 ms. La requête n'était pas lente, elle était répétée.
+type Resolveur struct {
+	defaut   perms.Level
+	regles   []perms.Rule
+	origines []Origine
+}
+
+// ResolveurDe : charge les règles d'un compte, une fois.
+func (d *DB) ResolveurDe(u *User) (*Resolveur, error) {
+	regles, origines, err := d.reglesEtOrigines(u.ID)
+	if err != nil {
+		return nil, err
+	}
+	return &Resolveur{defaut: u.DefaultLevel, regles: regles, origines: origines}, nil
+}
+
+// Droit : le droit effectif sur un chemin, et d'où il vient. Aucune E/S.
+//
+// Corps repris tel quel de l'ancien `DroitAvecOrigine` : l'échelle de
+// précédence ne change pas, seul l'endroit où les règles sont chargées change.
+func (r *Resolveur) Droit(chemin string) (perms.Level, Origine) {
+	cible := perms.Canon(chemin)
+	meilleur, profondeur := r.defaut, -1
+	origine := Origine{Barreau: "compte"}
+	for i, regle := range r.regles {
+		rp := perms.Canon(regle.Path)
+		if !couvre(rp, cible) {
+			continue
+		}
+		p := profondeurDe(rp)
+		switch {
+		case p > profondeur:
+			meilleur, profondeur, origine = regle.Level, p, r.origines[i]
+		case p == profondeur && regle.Level < meilleur:
+			meilleur, origine = regle.Level, r.origines[i]
+		}
+	}
+	return meilleur, origine
 }
 
 // estDans : la clé existe-t-elle ? perms.Invisible vaut 0, donc une simple
@@ -1058,11 +1247,26 @@ func mustDummy() string {
 type Groupe struct {
 	ID  int64
 	Nom string
+	// Genre : `dossier` ou `skill`. Une cohorte ne porte qu'un des deux, depuis
+	// le 02/09 - voir `migreGenreDeGroupe` pour la raison.
+	Genre string
 }
 
-// CreerGroupe crée un groupe et rend son id.
+// CreerGroupe crée une cohorte de DOSSIERS et rend son id.
+//
+// Le genre par défaut est `dossier` parce que c'est le geste courant. Les
+// appelants qui créent une cohorte de skills passent par `CreerGroupeDeGenre`,
+// et le nommer explicitement les oblige à savoir ce qu'ils créent.
 func (d *DB) CreerGroupe(nom string) (int64, error) {
-	res, err := d.sql.Exec(`INSERT INTO groupes (nom) VALUES (?)`, nom)
+	return d.CreerGroupeDeGenre(nom, GenreDossier)
+}
+
+// CreerGroupeDeGenre crée une cohorte du genre demandé.
+func (d *DB) CreerGroupeDeGenre(nom, genre string) (int64, error) {
+	if genre != GenreDossier && genre != GenreSkill {
+		return 0, fmt.Errorf("genre de cohorte inconnu : %q", genre)
+	}
+	res, err := d.sql.Exec(`INSERT INTO groupes (nom, genre) VALUES (?, ?)`, nom, genre)
 	if err != nil {
 		return 0, err
 	}
@@ -1085,7 +1289,7 @@ func (d *DB) SupprimeGroupe(id int64) error {
 
 // ListGroupes rend tous les groupes, triés par nom.
 func (d *DB) ListGroupes() ([]Groupe, error) {
-	rows, err := d.sql.Query(`SELECT id, nom FROM groupes ORDER BY nom`)
+	rows, err := d.sql.Query(`SELECT id, nom, genre FROM groupes ORDER BY nom`)
 	if err != nil {
 		return nil, err
 	}
@@ -1093,7 +1297,7 @@ func (d *DB) ListGroupes() ([]Groupe, error) {
 	var out []Groupe
 	for rows.Next() {
 		var g Groupe
-		if err := rows.Scan(&g.ID, &g.Nom); err != nil {
+		if err := rows.Scan(&g.ID, &g.Nom, &g.Genre); err != nil {
 			return nil, err
 		}
 		out = append(out, g)
@@ -1237,11 +1441,50 @@ func (d *DB) MembresGroupe(groupeID int64) (map[int64]perms.Level, error) {
 // APPELANTS : ne pas appeler avec un *sql.Rows encore ouvert. Le pool n'a
 // qu'une connexion (SetMaxOpenConns(1)).
 func (d *DB) RangeChemin(groupeID int64, chemin, genre, slug string) error {
-	_, err := d.sql.Exec(
+	// LE GENRE DU CHEMIN DOIT ÊTRE CELUI DE LA COHORTE (02/09).
+	//
+	// Sans cette garde, le typage ne serait qu'une étiquette : rien
+	// n'empêcherait de ranger un skill dans une cohorte de dossiers, et il y
+	// ouvrirait des accès depuis un écran qui ne le montre pas. Le refus vit
+	// ici, au seul point d'écriture, plutôt que dans chacun des appelants - une
+	// règle recopiée dans quatre handlers finit par manquer au cinquième.
+	attendu, err := d.GenreDuGroupe(groupeID)
+	if err != nil {
+		return err
+	}
+	if genre != attendu {
+		return fmt.Errorf("une cohorte de %ss ne peut pas porter un chemin de %s", attendu, genre)
+	}
+	_, err = d.sql.Exec(
 		`INSERT INTO groupe_chemins (groupe_id, chemin, genre, slug) VALUES (?, ?, ?, ?)
          ON CONFLICT(groupe_id, chemin) DO UPDATE SET genre = excluded.genre, slug = excluded.slug`,
 		groupeID, perms.Canon(chemin), genre, slug)
 	return err
+}
+
+// SetNiveauChemin pose (ou retire) le niveau qu'une cohorte accorde SUR CE
+// CHEMIN. Un niveau vide rend au chemin le niveau du membre, qui etait le seul
+// comportement avant le 01/09.
+//
+// C'est le geste « ce sous-dossier n'est pas pour cette cohorte » : la cohorte
+// porte `shared` en lecture, et `shared/direction` en invisible. Le chemin doit
+// deja etre range dans la cohorte - poser un niveau sur un chemin qu'elle ne
+// porte pas ne veut rien dire, et le silence le ferait croire fait.
+func (d *DB) SetNiveauChemin(groupeID int64, chemin string, niveau string) error {
+	res, err := d.sql.Exec(
+		`UPDATE groupe_chemins SET level = ? WHERE groupe_id = ? AND chemin = ?`,
+		niveau, groupeID, perms.Canon(chemin))
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("le chemin %q n'est pas rangé dans la cohorte %d", chemin, groupeID)
+	}
+	return nil
 }
 
 // SortChemin retire un chemin d'UN groupe, et le laisse dans les autres.
@@ -1287,12 +1530,15 @@ type CheminGroupe struct {
 	Chemin string
 	Genre  string
 	Slug   string
+	// Niveau : ce que la cohorte accorde sur ce chemin. Vide = le chemin prend
+	// le niveau du membre, qui etait le seul comportement avant le 01/09.
+	Niveau string
 }
 
 // CheminsDuGroupe rend les chemins d'un groupe pour un genre donné, triés.
 func (d *DB) CheminsDuGroupe(groupeID int64, genre string) ([]CheminGroupe, error) {
 	rows, err := d.sql.Query(
-		`SELECT chemin, genre, slug FROM groupe_chemins
+		`SELECT chemin, genre, slug, level FROM groupe_chemins
           WHERE groupe_id = ? AND genre = ? ORDER BY chemin`, groupeID, genre)
 	if err != nil {
 		return nil, err
@@ -1301,7 +1547,7 @@ func (d *DB) CheminsDuGroupe(groupeID int64, genre string) ([]CheminGroupe, erro
 	var out []CheminGroupe
 	for rows.Next() {
 		var c CheminGroupe
-		if err := rows.Scan(&c.Chemin, &c.Genre, &c.Slug); err != nil {
+		if err := rows.Scan(&c.Chemin, &c.Genre, &c.Slug, &c.Niveau); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
@@ -1327,9 +1573,27 @@ func (d *DB) SkillsDuGroupe(groupeID int64) ([]string, error) {
 //
 // Une seule requête, jointure des trois tables : les groupes dont il est
 // membre, croisés avec les skills qui y sont rangés.
-func (d *DB) reglesDeGroupe(userID int64) ([]perms.Rule, error) {
+// regleDeCohorte : une regle, ET la cohorte qui la porte.
+//
+// L'APPARTENANCE COMPTE POUR LA RESOLUTION, et c'est neuf du 01/09. Tant qu'une
+// cohorte ne portait qu'un niveau pour tous ses chemins, les fondre toutes dans
+// une map par chemin ne perdait rien. Depuis qu'un chemin porte son niveau, la
+// profondeur doit etre arbitree DANS une cohorte (le plus profond gagne, c'est
+// une exclusion voulue) avant que les cohortes ne soient fondues entre elles
+// (le plus permissif gagne, pour qu'une deuxieme cohorte ne retire jamais rien).
+type regleDeCohorte struct {
+	GroupeID int64
+	Path     string
+	Level    perms.Level
+}
+
+func (d *DB) reglesDeGroupe(userID int64) ([]regleDeCohorte, error) {
+	// COALESCE : le niveau du CHEMIN quand il est pose, celui du MEMBRE sinon.
+	// Le vide est le comportement d'avant la colonne, donc une base non migree
+	// et une base migree mais non reglee rendent exactement la meme chose.
 	rows, err := d.sql.Query(`
-        SELECT s.chemin, m.level
+        SELECT s.groupe_id, s.chemin, m.level,
+               CASE WHEN s.level = '' THEN m.level ELSE s.level END
           FROM groupe_membres m
           JOIN groupe_chemins s ON s.groupe_id = m.groupe_id
          WHERE m.user_id = ?
@@ -1338,17 +1602,276 @@ func (d *DB) reglesDeGroupe(userID int64) ([]perms.Rule, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []perms.Rule
+	var out []regleDeCohorte
 	for rows.Next() {
-		var chemin, l string
-		if err := rows.Scan(&chemin, &l); err != nil {
+		var gid int64
+		var chemin, membre, effectif string
+		if err := rows.Scan(&gid, &chemin, &membre, &effectif); err != nil {
 			return nil, err
 		}
-		lvl, ok := perms.ParseLevel(l)
+		nMembre, ok := perms.ParseLevel(membre)
 		if !ok {
-			return nil, fmt.Errorf("niveau de groupe invalide : %q", l)
+			return nil, fmt.Errorf("niveau de membre invalide : %q", membre)
 		}
-		out = append(out, perms.Rule{Path: chemin, Level: lvl})
+		nChemin, ok := perms.ParseLevel(effectif)
+		if !ok {
+			return nil, fmt.Errorf("niveau de chemin de cohorte invalide : %q", effectif)
+		}
+		// LE NIVEAU DU MEMBRE EST UN PLAFOND, jamais un plancher. Un membre en
+		// lecture ne gagne pas l'ecriture parce qu'un chemin la porte, et un
+		// chemin `invisible` ferme pour tout le monde. Meme forme que le plafond
+		// du jeton MCP (31/08) : un porteur ne depasse jamais ses propres droits.
+		if nChemin > nMembre {
+			nChemin = nMembre
+		}
+		out = append(out, regleDeCohorte{GroupeID: gid, Path: chemin, Level: nChemin})
 	}
 	return out, rows.Err()
+}
+
+// niveauDeCohorte : ce qu'UNE cohorte accorde sur `cible`, et si elle en dit
+// quelque chose.
+//
+// Le plus PROFOND de ses chemins couvrants gagne, comme perms.Effective le fait
+// pour les regles d'un compte. A profondeur egale - deux chemins canoniquement
+// identiques, que la cle primaire de `groupe_chemins` interdit deja - le plus
+// restrictif l'emporte, meme depart fail-closed que le resolveur.
+func niveauDeCohorte(cible string, regles []perms.Rule) (perms.Level, bool) {
+	cible = perms.Canon(cible)
+	meilleur, profondeur := perms.Invisible, -1
+	for _, r := range regles {
+		rp := perms.Canon(r.Path)
+		if !couvre(rp, cible) {
+			continue
+		}
+		p := profondeurDe(rp)
+		switch {
+		case p > profondeur:
+			meilleur, profondeur = r.Level, p
+		case p == profondeur && r.Level < meilleur:
+			meilleur = r.Level
+		}
+	}
+	return meilleur, profondeur >= 0
+}
+
+// couvre : `chemin` est-il `cible` ou l'un de ses ancetres par segment ?
+// Meme definition que `covers` dans perms, recopiee ici parce que le paquet ne
+// l'exporte pas et que l'exporter elargirait sa surface pour un seul appelant.
+func couvre(chemin, cible string) bool {
+	if chemin == "" || chemin == cible {
+		return true
+	}
+	return strings.HasPrefix(cible, chemin+"/")
+}
+
+func profondeurDe(chemin string) int {
+	if chemin == "" {
+		return 0
+	}
+	return strings.Count(chemin, "/") + 1
+}
+
+// CompteFermable dit si ce compte peut être fermé, et sinon POURQUOI.
+//
+// UN SEUL REFUS, et c'est une garde d'enfermement : fermer son PROPRE compte
+// détruit la session avec laquelle on agit. Le geste se termine sur une page
+// d'erreur, et si c'était le dernier administrateur, l'instance devient
+// inadministrable dans le même clic - les comptes membres restent, les fichiers
+// aussi, et plus personne ne peut créer d'administrateur puisque `CreateUser`
+// est derrière le middleware admin.
+//
+// IL Y AVAIT UNE SECONDE GARDE ICI, « pas le dernier administrateur », et elle a
+// été retirée après un contrôle de mutation : la neutraliser ne faisait tomber
+// aucun test, parce qu'elle est INATTEIGNABLE. Le middleware admin garantit que
+// celui qui agit est administrateur ; le refus d'auto-fermeture garantit qu'il
+// n'est pas la cible. Il reste donc toujours au moins un administrateur - lui -
+// après n'importe quelle fermeture que cette route accepte. Une garde qui ne
+// peut pas tirer ne protège rien et fait croire le contraire.
+//
+// Le jour où une autre porte fermera un compte (une commande, un script), c'est
+// ce raisonnement qu'il faudra reprendre, pas cette ligne qu'il aurait fallu
+// garder.
+func (d *DB) CompteFermable(id int64, parQui int64) error {
+	if id == parQui {
+		return errors.New("un compte ne peut pas se fermer lui-même : demandez à un autre administrateur")
+	}
+	if _, err := d.userByID(id); err != nil {
+		return err
+	}
+	return nil
+}
+
+// DeleteUser ferme un compte.
+//
+// CE QUI PART AVEC LUI, et rien d'autre : ses règles de droits, ses jetons
+// d'appareil, ses jetons MCP, ses appartenances de cohorte et l'état rapporté
+// par ses postes. Toutes ces tables portent déjà `ON DELETE CASCADE` sur
+// `users(id)` - la cascade n'est pas ajoutée ici, elle est seulement enfin
+// atteignable.
+//
+// CE QUI RESTE : les fichiers. Le dépôt garde le contenu ET l'auteur de chaque
+// commit. Fermer un compte retire un accès, ça n'efface pas un travail - c'est
+// la même doctrine que la corbeille locale de DAR-199, à l'autre bout de la
+// chaîne.
+//
+// PIÈGE MESURÉ, et il ne se voit pas depuis un autre outil : dans SQLite,
+// `PRAGMA foreign_keys` est désactivé par défaut et se règle PAR CONNEXION
+// (sqlite.org/foreignkeys.html). `db.Open` l'active (`_pragma=foreign_keys(1)`),
+// donc les cascades tirent ici. Une suppression faite hors de l'application -
+// un `sqlite3` sur le volume, un script d'inspection - laisserait des lignes
+// orphelines qui rouvriraient des droits au prochain compte qui hériterait de
+// l'identifiant. C'est la raison d'être de cette porte : il ne doit pas y avoir
+// de second chemin.
+func (d *DB) DeleteUser(id int64) error {
+	res, err := d.sql.Exec(`DELETE FROM users WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	touchees, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if touchees == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// GenreDossier / GenreSkill : les deux natures d'une cohorte.
+//
+// La valeur est la même que celle de `groupe_chemins.genre`, et ce n'est pas un
+// hasard : le genre d'une cohorte EST celui des chemins qu'elle a le droit de
+// porter. Deux vocabulaires pour la même distinction auraient fini par diverger.
+const (
+	GenreDossier = "dossier"
+	GenreSkill   = "skill"
+)
+
+// migreGenreDeGroupe donne un genre à chaque cohorte (02/09, retour de Colin).
+//
+// POURQUOI LE GENRE MONTE SUR LA COHORTE. Il vivait sur le CHEMIN, ce qui
+// laissait une cohorte porter des dossiers et des skills en même temps. Le
+// modèle s'en accommodait - la résolution ne lit jamais le genre - mais
+// l'écran, lui, ne pouvait pas être clair : le même panneau devait proposer un
+// arbre de dossiers et une liste de skills, et une cohorte mixte apparaissait
+// des deux côtés. « Les cohortes de skill et les cohortes de dossier doivent
+// être séparées », dit Colin, et la seule façon de le tenir est de l'empêcher
+// en base plutôt que de l'éviter à l'écran.
+//
+// LE GENRE SE DÉDUIT DU CONTENU, et le cas ambigu est le seul qui compte :
+//
+//   - une cohorte qui ne porte que des skills devient `skill` ;
+//   - une cohorte qui ne porte que des dossiers devient `dossier` ;
+//   - une cohorte VIDE devient `dossier`, parce que c'est le genre du geste
+//     courant (« l'équipe contenu, voilà ses dossiers ») et qu'une cohorte vide
+//     ne perd rien à être retypée à la main ;
+//   - une cohorte MIXTE est SCINDÉE : elle garde ses dossiers, et une seconde
+//     cohorte « <nom> (skills) » reçoit ses skills et les mêmes membres.
+//
+// La scission plutôt qu'un choix arbitraire : retyper une cohorte mixte en
+// `dossier` ferait disparaître ses skills de tous les écrans SANS retirer les
+// accès qu'ils ouvrent - des droits actifs et invisibles, exactement le mode
+// d'échec que ce produit passe son temps à fermer.
+//
+// Garde d'idempotence : l'existence de la colonne, comme `migreOrigine`.
+func (d *DB) migreGenreDeGroupe() error {
+	deja, err := d.colonneExiste("groupes", "genre")
+	if err != nil {
+		return err
+	}
+	if deja {
+		return nil
+	}
+	if _, err := d.sql.Exec(
+		`ALTER TABLE groupes ADD COLUMN genre TEXT NOT NULL DEFAULT '` + GenreDossier + `'`); err != nil {
+		return err
+	}
+	// Les cohortes qui ne portent QUE des skills.
+	if _, err := d.sql.Exec(`
+        UPDATE groupes SET genre = ?
+         WHERE EXISTS (SELECT 1 FROM groupe_chemins c WHERE c.groupe_id = groupes.id AND c.genre = ?)
+           AND NOT EXISTS (SELECT 1 FROM groupe_chemins c WHERE c.groupe_id = groupes.id AND c.genre = ?)`,
+		GenreSkill, GenreSkill, GenreDossier); err != nil {
+		return err
+	}
+	return d.scindeGroupesMixtes()
+}
+
+// scindeGroupesMixtes sort les skills des cohortes qui portent aussi des
+// dossiers, dans une cohorte jumelle qui garde les mêmes membres.
+func (d *DB) scindeGroupesMixtes() error {
+	rows, err := d.sql.Query(`
+        SELECT g.id, g.nom FROM groupes g
+         WHERE EXISTS (SELECT 1 FROM groupe_chemins c WHERE c.groupe_id = g.id AND c.genre = ?)
+           AND EXISTS (SELECT 1 FROM groupe_chemins c WHERE c.groupe_id = g.id AND c.genre = ?)
+         ORDER BY g.id`, GenreSkill, GenreDossier)
+	if err != nil {
+		return err
+	}
+	type mixte struct {
+		ID  int64
+		Nom string
+	}
+	var mixtes []mixte
+	for rows.Next() {
+		var m mixte
+		if err := rows.Scan(&m.ID, &m.Nom); err != nil {
+			rows.Close()
+			return err
+		}
+		mixtes = append(mixtes, m)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, m := range mixtes {
+		// Le nom est UNIQUE : on désambiguïse plutôt que d'échouer la migration
+		// entière sur une collision, ce qui laisserait la base à moitié typée.
+		nom := m.Nom + " (skills)"
+		for n := 2; ; n++ {
+			var un int
+			err := d.sql.QueryRow(`SELECT 1 FROM groupes WHERE nom = ?`, nom).Scan(&un)
+			if errors.Is(err, sql.ErrNoRows) {
+				break
+			}
+			if err != nil {
+				return err
+			}
+			nom = fmt.Sprintf("%s (skills %d)", m.Nom, n)
+		}
+		res, err := d.sql.Exec(`INSERT INTO groupes (nom, genre) VALUES (?, ?)`, nom, GenreSkill)
+		if err != nil {
+			return err
+		}
+		neuf, err := res.LastInsertId()
+		if err != nil {
+			return err
+		}
+		// Les MÊMES membres, aux mêmes niveaux : sans eux, la cohorte jumelle
+		// n'ouvrirait rien et la scission serait un retrait d'accès déguisé.
+		if _, err := d.sql.Exec(
+			`INSERT INTO groupe_membres (groupe_id, user_id, level)
+             SELECT ?, user_id, level FROM groupe_membres WHERE groupe_id = ?`, neuf, m.ID); err != nil {
+			return err
+		}
+		if _, err := d.sql.Exec(
+			`UPDATE groupe_chemins SET groupe_id = ? WHERE groupe_id = ? AND genre = ?`,
+			neuf, m.ID, GenreSkill); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// GenreDuGroupe rend le genre d'une cohorte.
+func (d *DB) GenreDuGroupe(id int64) (string, error) {
+	var genre string
+	err := d.sql.QueryRow(`SELECT genre FROM groupes WHERE id = ?`, id).Scan(&genre)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return genre, err
 }

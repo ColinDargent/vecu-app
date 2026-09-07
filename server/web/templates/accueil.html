@@ -5,11 +5,18 @@
   .carte { border: 1px solid var(--trait); background: var(--surface); box-shadow: var(--relief); padding: .8rem .9rem; }
   .carte .entete { display: flex; align-items: baseline; gap: .5rem; flex-wrap: wrap; }
   .carte .entete .nom { font-family: var(--mono); font-weight: 700; font-size: 15px; }
-  .carte dl { display: grid; grid-template-columns: auto 1fr; gap: .1rem .6rem; margin: .7rem 0 .6rem; font-size: 12.5px; }
+  .carte dl { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: .25rem .6rem; margin: .7rem 0 .6rem; font-size: 12.5px; }
   .carte dt { color: var(--encre-douce); }
   .carte dd { margin: 0; }
-  .pastilles { display: flex; gap: .25rem; flex-wrap: wrap; }
-  .pastille { font-family: var(--mono); font-size: 11px; padding: .1rem .35rem; border: 1px solid var(--trait); background: var(--surface-2); }
+  /* Les pastilles retombaient une par ligne : `dd` est le deuxième rail d'une
+     grille `auto 1fr`, et un nom de compte suivi de « · lecture » dépassait
+     souvent la place restante. Le `min-width: 0` rend la colonne compressible,
+     et les pastilles se rangent enfin côte à côte. Mesuré le 04/09. */
+  .pastilles { display: flex; gap: .25rem; flex-wrap: wrap; min-width: 0; }
+  .pastille {
+    font-family: var(--mono); font-size: 11px; padding: .1rem .35rem;
+    border: 1px solid var(--trait); background: var(--surface-2); white-space: nowrap;
+  }
   .pastille.rw { background: var(--accent); color: var(--accent-encre); border-color: var(--trait); }
   .carte .actions { display: flex; gap: .4rem; flex-wrap: wrap; }
   .bandeau {
@@ -22,7 +29,7 @@
 </style>
 
 <h1>Dossiers</h1>
-<p class="discret">Les dossiers auxquels vous avez accès. Donner un accès suffit : le dossier
+<p class="discret">{{if .User.IsAdmin}}Tous les dossiers du dépôt, y compris ceux que vous vous êtes fermés.{{else}}Les dossiers auxquels vous avez accès.{{end}} Donner un accès suffit : le dossier
 apparaît tout seul sur la machine de la personne, sans qu'elle ait rien à taper.</p>
 {{if .Erreur}}<p class="erreur">{{.Erreur}}</p>{{end}}
 
@@ -63,15 +70,32 @@ apparaît tout seul sur la machine de la personne, sans qu'elle ait rien à tape
       {{end}}
     </dl>
     <div class="actions"><a class="btn" href="{{.Href}}">Ouvrir</a></div>
+    {{if .Vide}}
+    {{/* La porte n'apparaît que sur un espace vide, et c'est délibéré : sur un
+         espace qui porte encore des fichiers, `espaces.Supprimer` refuse - la
+         retirer du contenu la rendrait orpheline, pas supprimée. Montrer un
+         bouton qui refuse toujours ferait chercher ce qu'on a mal fait. */}}
+    <form class="actions" method="post" action="/admin/dossiers/espaces/supprimer"
+          onsubmit="return confirm('Supprimer l\'espace {{.Nom}} ?')">
+      <input type="hidden" name="espace" value="{{.Nom}}">
+      <input name="confirmation" placeholder="{{.Nom}}" size="10" required
+             aria-label="Retaper le nom de l'espace pour confirmer">
+      <button>Supprimer cet espace vide</button>
+    </form>
+    {{end}}
   </div>
   {{end}}
 </div>
 {{else}}
-<p class="discret">Aucun dossier visible dans votre périmètre.</p>
+<p class="discret">{{if .User.IsAdmin}}Aucun dossier dans le dépôt.{{else}}Aucun dossier visible dans votre périmètre.{{end}}</p>
 {{end}}
 
-<p style="margin-top:1.1rem"><a href="/admin/export.zip">Exporter en ZIP</a>
-<span class="discret">(votre périmètre ; tout le dépôt pour un administrateur)</span></p>
+{{if .User.IsAdmin}}
+<p style="margin-top:1.1rem"><a href="/admin/cohortes">Voir les cohortes</a>
+<span class="discret">(qui est dans quelle cohorte, et ce qu'elle ouvre)</span></p>
+<p><a href="/admin/export.zip">Exporter en ZIP</a>
+<span class="discret">(tout le dépôt, hors skills des autres comptes)</span></p>
+{{end}}
 
 {{/* Créer un dossier depuis le web le posait à la RACINE Vécu sur le poste de
      chaque membre, jamais à l'endroit que la personne aurait choisi. La ligne

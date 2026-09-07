@@ -51,13 +51,7 @@ func cheminEtatApplication(dir string) string {
 	return filepath.Join(dossierApplication(), "etats", hex.EncodeToString(somme[:16])+".json")
 }
 
-func dossierApplication() string {
-	maison, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(os.TempDir(), "vecu")
-	}
-	return filepath.Join(maison, "Library", "Application Support", "Vecu")
-}
+func dossierApplication() string { return DossierApplication() }
 
 func existeFichier(p string) bool {
 	_, err := os.Stat(p)

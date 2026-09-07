@@ -858,7 +858,16 @@ func cibleRemplacement(dir, source, slug string) string {
 	if err != nil {
 		return dest
 	}
-	return depuis
+	// `ToSlash`, et ce n'est pas cosmétique : cette chaîne doit être EXACTEMENT
+	// celle que rend `cibleSymlink`, sinon la projection prend le lien pour un
+	// lien étranger et refuse d'y toucher. `filepath.Rel` rend des antislashs sur
+	// Windows là où `cibleSymlink` rend des barres obliques - les deux
+	// divergeaient donc sur ce système, et le même dossier se synchronisant entre
+	// un Mac et un PC, chacun aurait boudé les liens de l'autre en silence.
+	//
+	// Le repli absolu ci-dessus garde, lui, les séparateurs du système : il ne
+	// voyage pas d'une machine à l'autre, puisqu'il désigne un chemin hors racine.
+	return filepath.ToSlash(depuis)
 }
 
 // resolu : le chemin avec ses liens résolus, ou le chemin tel quel si la

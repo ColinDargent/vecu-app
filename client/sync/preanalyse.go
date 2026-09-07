@@ -183,7 +183,26 @@ func (e *Engine) gardesDe(abs string) []Garde {
 // Heuristique par le chemin, jamais une certitude - c'est pour ça que la garde
 // correspondante n'est pas bloquante.
 func synchroniseurTiers(abs string) string {
-	bas := strings.ToLower(abs)
+	// Antislashs ramenés à des barres obliques AVANT toute comparaison, et ce
+	// n'est pas une précaution de style.
+	//
+	// Les motifs ci-dessous sont écrits avec des barres obliques. Sur Windows,
+	// « C:\Users\x\OneDrive\vault » ne contient aucune barre oblique : AUCUN
+	// motif ne pouvait matcher, donc cette garde était morte sur ce système.
+	//
+	// Ce qu'elle protège, et pourquoi c'est le pire endroit où être muet :
+	// elle avertit qu'un vault est posé DANS un autre synchroniseur, situation où
+	// deux moteurs se disputent les mêmes fichiers - la famille de défauts qui a
+	// produit les copies de conflit en août. Et OneDrive est présent par défaut
+	// sur presque toutes les machines Windows, avec le dossier « Documents »
+	// souvent redirigé dedans sans que la personne le sache.
+	// Remplacement EXPLICITE et non `filepath.ToSlash` : celui-ci ne fait rien
+	// hors de Windows, donc la règle ne serait pas vérifiable depuis un Mac - or
+	// c'est là qu'on la relit. Le prix théorique est un faux positif sur un
+	// dossier macOS dont le nom contient littéralement « \dropbox » ; la garde
+	// n'étant qu'un AVERTISSEMENT et jamais un refus, il coûte une phrase de trop,
+	// là où le silence coûtait la garde entière sur tout Windows.
+	bas := strings.ToLower(strings.ReplaceAll(abs, `\`, "/"))
 	for motif, nom := range map[string]string{
 		"/library/mobile documents": "iCloud Drive",
 		"/library/cloudstorage":     "un service connecté au Finder (iCloud, Drive, Dropbox…)",

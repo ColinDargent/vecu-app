@@ -15,7 +15,7 @@ import (
 
 func groupeAvec(t *testing.T, d *DB, nom string, userID int64, niveau perms.Level, slugs ...string) int64 {
 	t.Helper()
-	id, err := d.CreerGroupe(nom)
+	id, err := d.CreerGroupeDeGenre(nom, GenreSkill)
 	if err != nil {
 		t.Fatalf("CreerGroupe : %v", err)
 	}
@@ -257,7 +257,7 @@ func TestOrdreDesReglesDeterministe(t *testing.T) {
 func TestGroupeSansMembreNOuvreRien(t *testing.T) {
 	d := newDB(t)
 	u, _ := d.CreateUser("achille", "mdp", perms.Invisible, false)
-	id, err := d.CreerGroupe("vide")
+	id, err := d.CreerGroupeDeGenre("vide", GenreSkill)
 	if err != nil {
 		t.Fatalf("CreerGroupe : %v", err)
 	}
@@ -278,6 +278,11 @@ func TestGroupeSansMembreNOuvreRien(t *testing.T) {
 // sur un écran détruisant l'état de l'autre.
 func TestGroupesDuCheminFiltreLeGenre(t *testing.T) {
 	d := newDB(t)
+	// 02/09 : une cohorte est TYPÉE, donc ce chemin ne peut plus être rangé
+	// comme dossier dans une cohorte de skills - `RangeChemin` le refuse. Le
+	// filtre de genre reste utile pour autant : deux cohortes, l'une de skills
+	// et l'autre de dossiers, peuvent porter le MÊME chemin, et chaque écran ne
+	// doit voir que la sienne.
 	ops, err := d.CreerGroupe("Ops")
 	if err != nil {
 		t.Fatalf("CreerGroupe : %v", err)
@@ -285,11 +290,19 @@ func TestGroupesDuCheminFiltreLeGenre(t *testing.T) {
 	if err := d.RangeChemin(ops, "shared/skills/veille", "dossier", ""); err != nil {
 		t.Fatalf("RangeChemin : %v", err)
 	}
-	if ids, err := d.GroupesDuChemin("shared/skills/veille", "skill"); err != nil || len(ids) != 0 {
-		t.Errorf("une ligne dossier remonte comme skill : %v (err %v)", ids, err)
+	// La cohorte de skills, sur le même chemin, ne doit pas se confondre.
+	lecteurs, err := d.CreerGroupeDeGenre("Lecteurs de skills", GenreSkill)
+	if err != nil {
+		t.Fatalf("CreerGroupeDeGenre : %v", err)
 	}
-	if ids, err := d.GroupesDuChemin("shared/skills/veille", "dossier"); err != nil || len(ids) != 1 {
-		t.Errorf("la ligne dossier ne remonte pas comme dossier : %v (err %v)", ids, err)
+	if err := d.RangeChemin(lecteurs, "shared/skills/veille", "skill", "veille"); err != nil {
+		t.Fatalf("RangeChemin skill : %v", err)
+	}
+	if ids, err := d.GroupesDuChemin("shared/skills/veille", "skill"); err != nil || len(ids) != 1 || ids[0] != lecteurs {
+		t.Errorf("le genre skill ne rend pas la cohorte de skills, et elle seule : %v (err %v)", ids, err)
+	}
+	if ids, err := d.GroupesDuChemin("shared/skills/veille", "dossier"); err != nil || len(ids) != 1 || ids[0] != ops {
+		t.Errorf("le genre dossier ne rend pas la cohorte de dossiers, et elle seule : %v (err %v)", ids, err)
 	}
 	// Elle ouvre bien l'accès malgré tout : le genre décide du rendu, jamais de
 	// la résolution.
@@ -438,5 +451,121 @@ func TestMigrationOrigineMarqueLesDefautsExistants(t *testing.T) {
 		autre.ID).Scan(&origine)
 	if origine != OrigineException {
 		t.Errorf("une écriture délibérée a été marquée comme défaut : %q", origine)
+	}
+}
+
+// 02/09. Une cohorte est TYPÉE : dossiers ou skills, jamais les deux.
+//
+// Le typage n'est pas cosmétique. Sans lui, l'écran ne peut pas être clair - le
+// même panneau devrait proposer un arbre de dossiers et une liste de skills - et
+// une cohorte mixte apparaîtrait dans les deux sections.
+func TestUneCohorteNeMelangePasDossiersEtSkills(t *testing.T) {
+	d := newDB(t)
+	dossiers, err := d.CreerGroupe("Salariés")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RangeChemin(dossiers, "shared/skills/veille", "skill", "veille"); err == nil {
+		t.Error("une cohorte de dossiers a accepté un skill")
+	}
+	sk, err := d.CreerGroupeDeGenre("Lecteurs", GenreSkill)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RangeChemin(sk, "clients", "dossier", ""); err == nil {
+		t.Error("une cohorte de skills a accepté un dossier")
+	}
+	// Et chacune accepte le sien.
+	if err := d.RangeChemin(dossiers, "clients", "dossier", ""); err != nil {
+		t.Errorf("une cohorte de dossiers refuse un dossier : %v", err)
+	}
+	if err := d.RangeChemin(sk, "shared/skills/veille", "skill", "veille"); err != nil {
+		t.Errorf("une cohorte de skills refuse un skill : %v", err)
+	}
+}
+
+// LA MIGRATION SCINDE une cohorte mixte au lieu de la retyper.
+//
+// Retyper en `dossier` ferait disparaître ses skills de tous les écrans SANS
+// retirer les accès qu'ils ouvrent : des droits actifs et invisibles, exactement
+// le mode d'échec que ce produit passe son temps à fermer.
+func TestLaMigrationScindeUneCohorteMixte(t *testing.T) {
+	d := newDB(t)
+	u, err := d.CreateUser("marie", "mdp", perms.Invisible, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// On fabrique l'état d'AVANT le typage : la colonne est retirée, puis les
+	// deux genres cohabitent dans la même cohorte.
+	g, err := d.CreerGroupe("Mixte")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetMembreGroupe(g, u.ID, perms.Lecture); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.RangeChemin(g, "clients", "dossier", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.sql.Exec(
+		`INSERT INTO groupe_chemins (groupe_id, chemin, genre, slug) VALUES (?, ?, ?, ?)`,
+		g, "shared/skills/veille", "skill", "veille"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.sql.Exec(`ALTER TABLE groupes DROP COLUMN genre`); err != nil {
+		t.Fatalf("préparation : %v", err)
+	}
+
+	if err := d.migreGenreDeGroupe(); err != nil {
+		t.Fatalf("migration : %v", err)
+	}
+
+	groupes, err := d.ListGroupes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groupes) != 2 {
+		t.Fatalf("la cohorte mixte n'a pas été scindée : %+v", groupes)
+	}
+	var origine, jumelle Groupe
+	for _, x := range groupes {
+		if x.Genre == GenreSkill {
+			jumelle = x
+		} else {
+			origine = x
+		}
+	}
+	if jumelle.ID == 0 || origine.ID == 0 {
+		t.Fatalf("les deux genres ne sont pas représentés : %+v", groupes)
+	}
+	if jumelle.Nom != "Mixte (skills)" {
+		t.Errorf("la jumelle est mal nommée : %q", jumelle.Nom)
+	}
+	// LE POINT DE LA SCISSION : les accès ne bougent pas. Sans les membres
+	// recopiés, la jumelle n'ouvrirait rien et la migration serait un retrait
+	// d'accès silencieux.
+	u, _ = d.UserByID(u.ID)
+	if niveau := niveauDe(t, d, u, "shared/skills/veille/SKILL.md"); niveau != perms.Lecture {
+		t.Errorf("la scission a fermé l'accès au skill : %v", niveau)
+	}
+	if niveau := niveauDe(t, d, u, "clients/acme/note.md"); niveau != perms.Lecture {
+		t.Errorf("la scission a fermé l'accès au dossier : %v", niveau)
+	}
+}
+
+// La migration est idempotente : `Open` la rejoue à chaque démarrage.
+func TestLaMigrationDuGenreEstIdempotente(t *testing.T) {
+	d := newDB(t)
+	if _, err := d.CreerGroupeDeGenre("Lecteurs", GenreSkill); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := d.migreGenreDeGroupe(); err != nil {
+			t.Fatalf("passe %d : %v", i, err)
+		}
+	}
+	groupes, _ := d.ListGroupes()
+	if len(groupes) != 1 || groupes[0].Genre != GenreSkill {
+		t.Errorf("la migration rejouée a changé l'état : %+v", groupes)
 	}
 }

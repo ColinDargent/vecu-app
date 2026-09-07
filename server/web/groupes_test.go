@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/colindargent/vecu/server/db"
 	"github.com/colindargent/vecu/server/perms"
 )
 
@@ -93,9 +94,12 @@ func TestGroupesReservesAuxAdmins(t *testing.T) {
 	if groupes, _ := s.DB.ListGroupes(); len(groupes) != 0 {
 		t.Errorf("un membre a créé un groupe : %v", groupes)
 	}
-	// L'écran ne lui montre pas non plus la gouvernance.
-	if body := get(h, "/admin/skills", c).Body.String(); strings.Contains(body, "Créer un groupe") {
-		t.Error("le formulaire de création de groupe est servi à un membre")
+	// L'ECRAN NON PLUS. Depuis que les cohortes ont leur propre page (DAR-196),
+	// la garde est la route et plus un `{{if}}` dans le gabarit : chercher
+	// l'absence du formulaire sur l'ecran des skills passerait desormais quoi
+	// qu'il arrive, puisqu'il n'y est plus pour personne.
+	if rec := get(h, "/admin/cohortes", c); rec.Code != http.StatusForbidden {
+		t.Errorf("l'écran des cohortes est servi à un membre : %d", rec.Code)
 	}
 }
 
@@ -108,7 +112,7 @@ func TestRangerReserveAuCreateurOuAdmin(t *testing.T) {
 	s.DB.CreateUser("curieux", "mdp", perms.Lecture, false)
 	s.Store.Write("shared/skills/sien/SKILL.md", contenuSkill("sien", "Skill d'achille."), "achille")
 	s.DB.ClaimSkill("sien", "shared/skills/sien", achille.ID)
-	id, _ := s.DB.CreerGroupe("equipe")
+	id, _ := s.DB.CreerGroupeDeGenre("equipe", db.GenreSkill)
 	// Depuis Q3 (25/08), un non-admin ne touche que les cohortes dont il est
 	// membre : son geste de partage suppose qu'il connaisse le groupe de
 	// l'intérieur.
@@ -160,7 +164,7 @@ func TestNiveauInvisibleSortDuGroupe(t *testing.T) {
 	s := newServer(t)
 	s.DB.CreateUser("colin", "mdp", perms.Ecriture, true)
 	achille, _ := s.DB.CreateUser("achille", "mdp", perms.Invisible, false)
-	id, _ := s.DB.CreerGroupe("equipe")
+	id, _ := s.DB.CreerGroupeDeGenre("equipe", db.GenreSkill)
 	s.DB.SetMembreGroupe(id, achille.ID, perms.Ecriture)
 	h := s.Handler()
 	c := login(t, h, "colin", "mdp")
@@ -190,18 +194,25 @@ func TestGroupesVisiblesSansAucunSkill(t *testing.T) {
 	h := s.Handler()
 	c := login(t, h, "colin", "mdp")
 
-	page := get(h, "/admin/skills", c).Body.String()
-	if !strings.Contains(page, "Aucun skill pour l'instant") {
+	// Le message du depot vide appartient a l'ecran des SKILLS, qui parle des
+	// skills. Les cohortes existent sans eux : c'est tout l'objet de ce test.
+	if page := get(h, "/admin/skills", c).Body.String(); !strings.Contains(page, "Aucun skill pour l'instant") {
 		t.Error("le message du dépôt vide a disparu")
 	}
-	if !strings.Contains(page, "Créer un groupe") {
-		t.Fatal("sans skill, on ne peut pas créer de groupe")
+	page := get(h, "/admin/cohortes", c).Body.String()
+	// 02/09 : « groupe » devient « cohorte » a l'ecran, et la creation demande
+	// desormais son genre - dossiers ou skills.
+	if !strings.Contains(page, "Créer une cohorte") {
+		t.Fatal("sans skill, on ne peut pas créer de cohorte")
+	}
+	if !strings.Contains(page, `name="genre"`) {
+		t.Error("la création ne demande pas le genre de la cohorte")
 	}
 
 	if rec := postForm(h, "/admin/skills/groupes", url.Values{"nom": {"Équipe contenu"}}, c); rec.Code != http.StatusSeeOther {
 		t.Fatalf("création : attendu 303, obtenu %d", rec.Code)
 	}
-	page = get(h, "/admin/skills", c).Body.String()
+	page = get(h, "/admin/cohortes", c).Body.String()
 	if !strings.Contains(page, "Équipe contenu") {
 		t.Error("le groupe créé sur un dépôt sans skill ne s'affiche pas")
 	}
@@ -222,7 +233,7 @@ func TestMembresGroupeAtomique(t *testing.T) {
 	s := newServer(t)
 	colin, _ := s.DB.CreateUser("colin", "mdp", perms.Ecriture, true)
 	achille, _ := s.DB.CreateUser("achille", "mdp", perms.Invisible, false)
-	id, _ := s.DB.CreerGroupe("equipe")
+	id, _ := s.DB.CreerGroupeDeGenre("equipe", db.GenreSkill)
 	h := s.Handler()
 	c := login(t, h, "colin", "mdp")
 
@@ -250,16 +261,19 @@ func TestGroupeSeRenommeEtSeCompose(t *testing.T) {
 		s.Store.Write("shared/skills/"+slug+"/SKILL.md", contenuSkill(slug, "Un skill."), "colin")
 		s.DB.ClaimSkill(slug, "shared/skills/"+slug, colin.ID)
 	}
-	id, _ := s.DB.CreerGroupe("equipe")
+	id, _ := s.DB.CreerGroupeDeGenre("equipe", db.GenreSkill)
 	s.DB.SetMembreGroupe(id, achille.ID, perms.Lecture)
 	s.DB.RangeChemin(id, "shared/skills/linkedin-post", "skill", "linkedin-post")
 	h := s.Handler()
 	c := login(t, h, "colin", "mdp")
 
 	// Le panneau est là, avec le nom modifiable et les deux skills cochables.
-	page := get(h, "/admin/skills", c).Body.String()
-	if !strings.Contains(page, "Modifier le groupe") {
-		t.Fatal("la vue groupe ne propose pas de le modifier")
+	page := get(h, "/admin/cohortes", c).Body.String()
+	// « Cohorte » et pas « groupe » : l'écran s'appelle Cohortes, le menu dit
+	// Cohortes, et le panneau disait « Modifier le groupe ». Deux mots pour un
+	// objet sur le même écran (04/09).
+	if !strings.Contains(page, "Modifier cette cohorte") {
+		t.Fatal("la vue cohorte ne propose pas de la modifier")
 	}
 	// Les cases de composition, pas les champs cachés des formulaires de la
 	// ligne du skill, qui portent aussi un `name="slug"`.
@@ -300,7 +314,7 @@ func TestGroupeSeRenommeEtSeCompose(t *testing.T) {
 func TestModifierGroupeRefuseUnSlugInconnu(t *testing.T) {
 	s := newServer(t)
 	s.DB.CreateUser("colin", "mdp", perms.Ecriture, true)
-	id, _ := s.DB.CreerGroupe("equipe")
+	id, _ := s.DB.CreerGroupeDeGenre("equipe", db.GenreSkill)
 	h := s.Handler()
 	c := login(t, h, "colin", "mdp")
 
@@ -323,7 +337,7 @@ func TestModifierGroupeReserveAuxAdmins(t *testing.T) {
 	s := newServer(t)
 	s.DB.CreateUser("colin", "mdp", perms.Ecriture, true)
 	s.DB.CreateUser("achille", "mdp", perms.Lecture, false)
-	id, _ := s.DB.CreerGroupe("equipe")
+	id, _ := s.DB.CreerGroupeDeGenre("equipe", db.GenreSkill)
 	h := s.Handler()
 	c := login(t, h, "achille", "mdp")
 
@@ -349,13 +363,15 @@ func TestRangerUnSkillDansDeuxGroupes(t *testing.T) {
 	achille, _ := s.DB.CreateUser("achille", "mdp", perms.Invisible, false)
 	s.Store.Write("shared/skills/veille/SKILL.md", contenuSkill("veille", "Un skill."), "colin")
 	s.DB.ClaimSkill("veille", "shared/skills/veille", colin.ID)
-	ops, _ := s.DB.CreerGroupe("Opérations")
-	mkt, _ := s.DB.CreerGroupe("Marketing")
+	ops, _ := s.DB.CreerGroupeDeGenre("Opérations", db.GenreSkill)
+	mkt, _ := s.DB.CreerGroupeDeGenre("Marketing", db.GenreSkill)
 	s.DB.SetMembreGroupe(ops, achille.ID, perms.Lecture)
 	h := s.Handler()
 	c := login(t, h, "colin", "mdp")
 
-	// L'écran propose bien des cases, une par groupe, et plus un select.
+	// Les cases de groupe de la LIGNE D'UN SKILL, donc sur l'ecran des skills :
+	// ranger un skill dans une cohorte est un geste de partage, ouvert a son
+	// createur, et il reste la ou vivent les skills.
 	page := get(h, "/admin/skills", c).Body.String()
 	if n := strings.Count(page, `type="checkbox" name="groupe_id"`); n != 2 {
 		t.Fatalf("%d case(s) de groupe rendue(s), 2 attendues", n)
@@ -412,9 +428,9 @@ func TestCreateurNeDefaitPasUneCohorteQuIlNeConnaitPas(t *testing.T) {
 	s.Store.Write("shared/skills/sien/SKILL.md", contenuSkill("sien", "Skill d'achille."), "achille")
 	s.DB.ClaimSkill("sien", "shared/skills/sien", achille.ID)
 
-	sienne, _ := s.DB.CreerGroupe("La sienne")
+	sienne, _ := s.DB.CreerGroupeDeGenre("La sienne", db.GenreSkill)
 	s.DB.SetMembreGroupe(sienne, achille.ID, perms.Lecture)
-	admin, _ := s.DB.CreerGroupe("Réglée par l'admin")
+	admin, _ := s.DB.CreerGroupeDeGenre("Réglée par l'admin", db.GenreSkill)
 	s.DB.RangeChemin(sienne, skillPath("sien"), "skill", "sien")
 	s.DB.RangeChemin(admin, skillPath("sien"), "skill", "sien")
 

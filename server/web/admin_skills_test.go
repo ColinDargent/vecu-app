@@ -160,6 +160,11 @@ func TestAdminNeModifiePasLeSkillDunAutre(t *testing.T) {
 func TestExemptionNeFranchitPasLaRacineDesSkills(t *testing.T) {
 	s := newServer(t)
 	colin, _ := s.DB.CreateUser("colin", "mdp", perms.Ecriture, true)
+	achille, _ := s.DB.CreateUser("achille", "mdp", perms.Lecture, false)
+	// Le skill prive d'un AUTRE compte. Sans cette fixture, l'assertion de fin
+	// cherche une chaine qui n'a jamais pu apparaitre : elle passerait quoi
+	// qu'on fasse, y compris si la borne des skills sautait.
+	prive(t, s, "blank-page", "Sortir de la page blanche.", achille.ID, "achille")
 	s.Store.Write("clients/vdf/secret.md", "confidentiel", "achille")
 	if err := s.DB.SetPermission(colin.ID, "clients/vdf", perms.Invisible); err != nil {
 		t.Fatalf("SetPermission : %v", err)
@@ -167,11 +172,33 @@ func TestExemptionNeFranchitPasLaRacineDesSkills(t *testing.T) {
 	h := s.Handler()
 	c := login(t, h, "colin", "mdp")
 
-	if rec := get(h, "/admin/dossiers/clients/vdf", c); rec.Code != http.StatusNotFound {
-		t.Errorf("un dossier rendu invisible à l'admin reste accessible : %d", rec.Code)
+	// LE DOSSIER RESTE ADMINISTRABLE, et c'est un renversement assumé du 01/09
+	// (DAR-196). Il rendait 404, donc un administrateur qui fermait un dossier
+	// ne pouvait plus le rouvrir. Deux faits ont tranché : l'assertion valait
+	// pour l'ÉCRAN alors que `/admin/export.zip` servait déjà le même dossier,
+	// contenu compris, à ce même administrateur ; et l'export est désormais
+	// réservé aux administrateurs, donc son exemption est la fonction de
+	// l'outil et plus une anomalie. L'écran cesse d'être plus strict que la
+	// porte d'à côté.
+	if rec := get(h, "/admin/dossiers/clients/vdf", c); rec.Code != http.StatusOK {
+		t.Errorf("un dossier fermé par l'admin doit rester administrable : %d", rec.Code)
 	}
-	if body := get(h, "/admin/", c).Body.String(); strings.Contains(body, "vdf") {
-		t.Error("un dossier invisible apparaît sur l'accueil de l'admin")
+	// MAIS ADMINISTRER N'EST PAS LIRE : le contenu du fichier reste refusé.
+	// C'est la frontière qui rend le renversement ci-dessus acceptable.
+	if rec := get(h, "/admin/dossiers/clients/vdf/secret.md", c); rec.Code != http.StatusNotFound {
+		t.Errorf("le CONTENU d'un fichier fermé doit rester refusé : %d", rec.Code)
+	}
+	// Et l'exemption s'arrête toujours à la racine des skills, ce qui est le
+	// sujet de ce test. La borne exacte est « les FICHIERS d'un skill », pas
+	// « son existence » : `/admin/skills` donne depuis le 21/08 un plancher
+	// lecture à tout admin sur le nom et la description de chaque skill
+	// (TestAdminVoitLesSkillsPrivesDesAutres). C'est l'arborescence du dépôt
+	// qui doit rester fermée.
+	if rec := get(h, "/admin/dossiers/shared/skills/blank-page", c); rec.Code != http.StatusNotFound {
+		t.Errorf("les fichiers du skill privé d'un autre compte sont exposés : %d", rec.Code)
+	}
+	if body := get(h, "/admin/dossiers/shared", c).Body.String(); strings.Contains(body, "skills") {
+		t.Error("la zone skills apparaît dans l'arborescence d'administration")
 	}
 }
 

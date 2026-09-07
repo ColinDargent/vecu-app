@@ -14,6 +14,7 @@ import (
 
 	"github.com/colindargent/vecu/server/db"
 	"github.com/colindargent/vecu/server/perms"
+	"github.com/colindargent/vecu/server/skills"
 )
 
 // admin : comme session, mais réservé aux comptes IsAdmin.
@@ -28,11 +29,27 @@ func (s *Server) admin(next func(http.ResponseWriter, *http.Request, *db.User)) 
 }
 
 // niveauFR : libellé d'affichage accentué d'un niveau.
+// LA POSTURE DU COFFRE (DAR-196, 01/09). Trois mots a la place du vocabulaire
+// de niveaux : Prive / Lecture seule / Ouvert.
+//
+// POURQUOI. Le lecteur de ces ecrans est le mainteneur du second cerveau chez
+// un client, pas nous. « invisible » decrit ce que le SYSTEME fait ; « privé »
+// decrit ce que la personne veut. Et « ecriture » ne dit pas qu'elle inclut la
+// lecture, ce qui fait hesiter a chaque reglage.
+//
+// LE MODELE NE BOUGE PAS. Ces trois mots vivent dans l'INTERFACE seulement : la
+// base, l'API et le MCP continuent de parler `invisible`/`lecture`/`ecriture`,
+// et les valeurs postees par les formulaires aussi. Traduire jusqu'au stockage
+// aurait demande une migration pour un gain d'affichage.
 func niveauFR(l perms.Level) string {
-	if l == perms.Ecriture {
-		return "écriture"
+	switch l {
+	case perms.Ecriture:
+		return "ouvert"
+	case perms.Lecture:
+		return "lecture seule"
+	default:
+		return "privé"
 	}
-	return l.String() // invisible, lecture : déjà corrects
 }
 
 type userVM struct {
@@ -40,13 +57,31 @@ type userVM struct {
 	Username string
 	Niveau   string
 	IsAdmin  bool
+	// Fermable : vide si le compte peut être fermé, sinon le MOTIF du refus.
+	//
+	// Calculé au rendu et pas au clic, pour que la raison soit lisible AVANT
+	// d'essayer. Un bouton qui n'explique qu'après coup fait recommencer.
+	Fermable string
 }
 
 type usersData struct {
 	baseData
 	Users   []userVM
 	Niveaux []niveauVM
-	Erreur  string
+	// Cohortes : celles auxquelles la création peut rattacher le compte. C'est
+	// le geste courant à l'arrivée de quelqu'un - on le met dans une cohorte,
+	// on ne lui pose pas ses dossiers un par un.
+	//
+	// SÉPARÉES PAR GENRE, comme sur leur propre écran (04/09) : une case
+	// « Skills contenu » et une case « Équipe delivery » dans la même liste ne
+	// disent pas ce qu'elles ouvrent, et le paragraphe au-dessus parle des deux
+	// à la fois. Le formulaire, lui, poste toujours le même `cohorte_id`.
+	CohortesDossiers []cohorteChoixVM
+	CohortesSkills   []cohorteChoixVM
+	// Cohortes : les deux listes réunies, pour la seule question qui ne regarde
+	// pas le genre - « y a-t-il seulement une cohorte à proposer ».
+	Cohortes []cohorteChoixVM
+	Erreur   string
 }
 
 func (s *Server) renderUsers(w http.ResponseWriter, status int, u *db.User, erreur string) {
@@ -55,9 +90,27 @@ func (s *Server) renderUsers(w http.ResponseWriter, status int, u *db.User, erre
 		http.Error(w, "erreur interne", http.StatusInternalServerError)
 		return
 	}
+	cohortes, err := s.DB.ListGroupes()
+	if err != nil {
+		http.Error(w, "erreur interne", http.StatusInternalServerError)
+		return
+	}
 	data := usersData{baseData: base(u, "utilisateurs"), Niveaux: niveauxVM, Erreur: erreur}
+	for _, g := range cohortes {
+		choix := cohorteChoixVM{ID: g.ID, Nom: g.Nom, Genre: g.Genre}
+		data.Cohortes = append(data.Cohortes, choix)
+		if g.Genre == db.GenreSkill {
+			data.CohortesSkills = append(data.CohortesSkills, choix)
+			continue
+		}
+		data.CohortesDossiers = append(data.CohortesDossiers, choix)
+	}
 	for _, x := range list {
-		data.Users = append(data.Users, userVM{ID: x.ID, Username: x.Username, Niveau: niveauFR(x.DefaultLevel), IsAdmin: x.IsAdmin})
+		vm := userVM{ID: x.ID, Username: x.Username, Niveau: niveauFR(x.DefaultLevel), IsAdmin: x.IsAdmin}
+		if err := s.DB.CompteFermable(x.ID, u.ID); err != nil {
+			vm.Fermable = err.Error()
+		}
+		data.Users = append(data.Users, vm)
 	}
 	render(w, status, "users", data)
 }
@@ -85,14 +138,120 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request, u *db.
 			"nom d'utilisateur invalide : lettres, chiffres, « . _ - », 64 caractères max")
 		return
 	}
+	// LES COHORTES SONT VALIDÉES AVANT LA CRÉATION, pour ne pas laisser un
+	// compte à moitié installé derrière un message d'erreur. Créer puis échouer
+	// sur les cohortes obligerait à deviner s'il faut recommencer ou compléter.
+	connues, err := s.DB.ListGroupes()
+	if err != nil {
+		erreurHTTP(w, "erreur interne", http.StatusInternalServerError)
+		return
+	}
+	valide := make(map[int64]bool, len(connues))
+	for _, g := range connues {
+		valide[g.ID] = true
+	}
+	var cohortes []int64
+	for _, brut := range r.PostForm["cohorte_id"] {
+		id, err := strconv.ParseInt(strings.TrimSpace(brut), 10, 64)
+		if err != nil || !valide[id] {
+			s.renderUsers(w, http.StatusBadRequest, u, "cohorte introuvable")
+			return
+		}
+		cohortes = append(cohortes, id)
+	}
+	// LE NIVEAU DANS LES COHORTES EST UN PLAFOND, et il est distinct du défaut
+	// du compte - c'est ce qui fait tenir le modèle « privé par défaut, les
+	// cohortes ouvrent ». Le prendre égal au défaut le rendrait inutile : un
+	// compte privé serait plafonné à `invisible`, donc ses cohortes ne lui
+	// ouvriraient rien.
+	//
+	// « lecture seule » à défaut, et c'est le sens prudent. L'audit du 01/09 l'a
+	// posé : ce qu'on cherche en priorité est l'OUVERTURE non voulue, pas la
+	// fermeture. Une fermeture excessive se signale toute seule le jour où
+	// quelqu'un ne trouve pas un fichier ; une ouverture excessive ne se signale
+	// jamais.
+	plafond := perms.Lecture
+	if brut := r.PostFormValue("niveau_cohorte"); brut != "" {
+		n, ok := perms.ParseLevel(brut)
+		if !ok {
+			s.renderUsers(w, http.StatusBadRequest, u, "niveau de cohorte invalide")
+			return
+		}
+		plafond = n
+	}
+
 	// CreateUser pose atomiquement « skills privés par défaut » pour tout compte
 	// (admin inclus) : rien à faire ici.
-	if _, err := s.DB.CreateUser(username, password, niveau, r.PostFormValue("admin") == "on"); err != nil {
+	nouveau, err := s.DB.CreateUser(username, password, niveau, r.PostFormValue("admin") == "on")
+	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
 			s.renderUsers(w, http.StatusBadRequest, u, "ce nom d'utilisateur est déjà pris")
 			return
 		}
 		log.Printf("web: création utilisateur : %v", err)
+		http.Error(w, "erreur interne", http.StatusInternalServerError)
+		return
+	}
+	for _, id := range cohortes {
+		if err := s.DB.SetMembreGroupe(id, nouveau.ID, plafond); err != nil {
+			// Le compte EXISTE : ne pas faire passer un rattachement manqué pour
+			// un échec de création, sinon on le recrée et le nom est déjà pris.
+			log.Printf("web: rattachement de %s à la cohorte %d : %v", username, id, err)
+			s.renderUsers(w, http.StatusBadRequest, u,
+				"le compte « "+username+" » est créé, mais son rattachement aux cohortes a échoué : "+
+					"reprenez-le depuis l'écran des cohortes")
+			return
+		}
+	}
+	http.Redirect(w, r, "/admin/users", http.StatusSeeOther)
+}
+
+// POST /admin/users/{id}/fermer : fermer un compte (DAR-204).
+//
+// Jusqu'ici, Vécu ne savait pas le faire. Ni `DeleteUser` dans `server/db`, ni
+// route, ni commande : la seule voie était du SQL direct sur la base de
+// production, et elle est fermée aussi - le conteneur n'a ni `sqlite3` ni
+// `python3`. Un client aura pourtant des comptes à fermer, et le mainteneur de
+// DAR-198 rencontre le geste avant nous.
+//
+// LA CONFIRMATION EST LE NOM DU COMPTE, retapé. Pas une case à cocher : le
+// geste est irréversible pour les droits, la ligne est au milieu d'un tableau,
+// et une case se coche par réflexe. Retaper un nom demande de regarder LEQUEL
+// on ferme - qui est exactement l'erreur qu'on cherche à empêcher.
+func (s *Server) handleFermerCompte(w http.ResponseWriter, r *http.Request, u *db.User) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		s.renderUsers(w, http.StatusBadRequest, u, "identifiant de compte invalide")
+		return
+	}
+	cible, err := s.DB.UserByID(id)
+	if errors.Is(err, db.ErrNotFound) {
+		s.renderUsers(w, http.StatusNotFound, u, "ce compte n'existe pas (ou plus)")
+		return
+	}
+	if err != nil {
+		log.Printf("web: lecture du compte à fermer : %v", err)
+		http.Error(w, "erreur interne", http.StatusInternalServerError)
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		s.renderUsers(w, http.StatusBadRequest, u, "formulaire invalide")
+		return
+	}
+	// La garde de saisie AVANT la garde d'enfermement : dire « c'est le dernier
+	// administrateur » à quelqu'un qui a mal tapé le nom lui apprend un fait sur
+	// un compte qu'il ne visait peut-être pas.
+	if r.PostFormValue("confirmation") != cible.Username {
+		s.renderUsers(w, http.StatusBadRequest, u,
+			"compte non fermé : le nom saisi ne correspond pas à « "+cible.Username+" »")
+		return
+	}
+	if err := s.DB.CompteFermable(id, u.ID); err != nil {
+		s.renderUsers(w, http.StatusBadRequest, u, "compte non fermé : "+err.Error())
+		return
+	}
+	if err := s.DB.DeleteUser(id); err != nil {
+		log.Printf("web: fermeture du compte %d : %v", id, err)
 		http.Error(w, "erreur interne", http.StatusInternalServerError)
 		return
 	}
@@ -111,6 +270,16 @@ type nodeVM struct {
 	Niveau     string
 	Profondeur int
 	Direct     bool // une règle est posée exactement sur ce chemin
+	// Origine : d'OÙ vient ce droit, en clair. Sans elle, le mainteneur lit
+	// « Marie : lecture » et ne sait pas s'il doit toucher la règle de Marie, sa
+	// cohorte, le défaut du dossier ou celui de son compte - donc il tâtonne, et
+	// il tâtonne sur des droits.
+	//
+	// L'écran des dossiers le disait depuis le 01/09 ; la fiche d'un compte,
+	// non. C'est pourtant elle qu'on ouvre quand on se demande « pourquoi cette
+	// personne voit ça », et c'est le seul écran où la réponse « par sa
+	// cohorte » évite de poser une exception qui doublerait la cohorte.
+	Origine string
 }
 
 type droitsData struct {
@@ -129,14 +298,42 @@ type droitsData struct {
 // Source unique des niveaux proposés par l'UI.
 type niveauVM struct{ Valeur, Libelle string }
 
+// L'ordre va du plus ferme au plus ouvert, comme les boutons se lisent.
+// `Valeur` reste la forme de STOCKAGE : c'est ce que le formulaire poste, et le
+// serveur n'apprend aucun vocabulaire d'interface.
 var niveauxVM = []niveauVM{
-	{"invisible", "invisible"},
-	{"lecture", "lecture"},
-	{"ecriture", "écriture"},
+	{"invisible", "privé"},
+	{"lecture", "lecture seule"},
+	{"ecriture", "ouvert"},
+}
+
+// origineCouvrante : l'origine de la règle qui décide de `cible`.
+//
+// La même arbitrage que `perms.Effective` : la règle la plus PROFONDE qui
+// couvre le chemin gagne. Recalculer ici plutôt que faire porter l'origine par
+// `perms.Rule` garde le paquet `perms` ignorant de la base - il ne connaît que
+// des chemins et des niveaux, et c'est ce qui le rend testable seul.
+func origineCouvrante(chemin string, regles []perms.Rule, origines []db.Origine) db.Origine {
+	chemin = perms.Canon(chemin)
+	meilleure, profondeur := db.Origine{}, -1
+	for i, r := range regles {
+		rp := perms.Canon(r.Path)
+		if rp != "" && rp != chemin && !strings.HasPrefix(chemin, rp+"/") {
+			continue
+		}
+		p := 0
+		if rp != "" {
+			p = strings.Count(rp, "/") + 1
+		}
+		if p > profondeur && i < len(origines) {
+			meilleure, profondeur = origines[i], p
+		}
+	}
+	return meilleure
 }
 
 func (s *Server) renderDroits(w http.ResponseWriter, status int, u, cible *db.User, erreur string) {
-	rules, err := s.DB.Rules(cible.ID)
+	rules, origines, err := s.DB.ReglesEtOrigines(cible.ID)
 	if err != nil {
 		http.Error(w, "erreur interne", http.StatusInternalServerError)
 		return
@@ -172,9 +369,13 @@ func (s *Server) renderDroits(w http.ResponseWriter, status int, u, cible *db.Us
 		http.Error(w, "erreur interne", http.StatusInternalServerError)
 		return
 	}
+	// La VUE D'ADMINISTRATION, pas le perimetre de lecture (DAR-196). Deux des
+	// six portes d'ecriture vivent sur cet ecran (`/droits` et
+	// `/droits/supprimer`) : le laisser filtre y rouvrait l'enfermement corrige
+	// sur l'accueil et sur l'ecran des dossiers, un ecran plus loin.
 	dirs := make([]string, 0, len(tousDirs))
 	for _, d := range tousDirs {
-		if perms.CanRead(d, u.DefaultLevel, adminRules) {
+		if (u.IsAdmin && !skills.SousRacine(d)) || perms.CanRead(d, u.DefaultLevel, adminRules) {
 			dirs = append(dirs, d)
 		}
 	}
@@ -205,12 +406,18 @@ func (s *Server) renderDroits(w http.ResponseWriter, status int, u, cible *db.Us
 		data.Regles = append(data.Regles, ruleVM{Path: ru.Path, Niveau: niveauFR(ru.Level), Inconnue: !existe[ru.Path]})
 	}
 	for _, d := range dirs {
+		// `DroitAvecOrigine` relit la base à chaque appel ; sur un arbre de
+		// plusieurs centaines de dossiers, c'est ce qui a coûté 645 ms à l'écran
+		// du mainteneur le 01/09. On prend donc l'origine dans les règles DÉJÀ
+		// résolues, qui portent la leur - une seule requête pour tout l'arbre.
+		niveau := perms.Effective(d, cible.DefaultLevel, rules)
 		data.Arbre = append(data.Arbre, nodeVM{
 			Path:       d,
 			Nom:        path.Base(d),
-			Niveau:     niveauFR(perms.Effective(d, cible.DefaultLevel, rules)),
+			Niveau:     niveauFR(niveau),
 			Profondeur: strings.Count(d, "/"),
 			Direct:     direct[perms.Canon(d)],
+			Origine:    origineEnClair(origineCouvrante(d, rules, origines)),
 		})
 	}
 	render(w, status, "droits", data)
@@ -313,6 +520,10 @@ func (s *Server) handleSetDroit(w http.ResponseWriter, r *http.Request, u *db.Us
 	}
 	if !validChemin(canon) {
 		s.renderDroits(w, http.StatusBadRequest, u, cible, "chemin invalide")
+		return
+	}
+	if refus := refusZoneSkills(canon); refus != "" {
+		s.renderDroits(w, http.StatusBadRequest, u, cible, refus)
 		return
 	}
 	if err := s.DB.SetPermission(cible.ID, canon, niveau); err != nil {

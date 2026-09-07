@@ -169,7 +169,7 @@ func telechargeArtefact(ctx context.Context, client *http.Client, serveur, token
 // et le fsync (durabilité : après une coupure de courant, le rename ne doit pas
 // pointer un fichier au contenu non flushé). Rend le chemin du temporaire.
 func ecritTemp(dir string, bin []byte) (string, error) {
-	tmp, err := os.CreateTemp(dir, ".vecu-app-*.tmp")
+	tmp, err := os.CreateTemp(dir, ".vecu-app-*.tmp"+suffixeExecutable)
 	if err != nil {
 		return "", fmt.Errorf("fichier temporaire : %w", err)
 	}
@@ -209,25 +209,6 @@ func sondeSante(bin, versionAttendue string) error {
 	got := strings.TrimSpace(string(out))
 	if got != versionAttendue {
 		return fmt.Errorf("version inattendue de la sonde : %q != %q", got, versionAttendue)
-	}
-	return nil
-}
-
-// bascule remplace `cible` par `tmpNom` de façon atomique (os.Rename sur le même
-// système de fichiers), après avoir conservé l'ancien binaire sous `cible.old`
-// (lien dur = filet de recovery manuel, sans copie). fsync du dossier pour que
-// l'entrée renommée survive à une coupure.
-func bascule(tmpNom, cible string) error {
-	vieux := cible + ".old"
-	_ = os.Remove(vieux)
-	_ = os.Link(cible, vieux) // best-effort : recovery manuel si le neuf plante
-	if err := os.Rename(tmpNom, cible); err != nil {
-		os.Remove(tmpNom)
-		return fmt.Errorf("remplacement : %w", err)
-	}
-	if d, err := os.Open(filepath.Dir(cible)); err == nil {
-		_ = d.Sync()
-		d.Close()
 	}
 	return nil
 }

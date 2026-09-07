@@ -176,6 +176,9 @@ func TestParcoursADeBoutEnBout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("moteur après montage : %v", err)
 	}
+	// Windows ne supprime pas un fichier ouvert : sans ce relâchement, le
+	// nettoyage de t.TempDir() échoue sur .vecu/lock. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = e.Close() })
 	if err := e.SyncOnce(); err != nil {
 		t.Fatalf("premier cycle : %v", err)
 	}
@@ -243,6 +246,9 @@ func TestSansAdoptionLeDossierNestPasEnvoye(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows ne supprime pas un fichier ouvert : sans ce relâchement, le
+	// nettoyage de t.TempDir() échoue sur .vecu/lock. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = e.Close() })
 	if err := e.SyncOnce(); err != nil {
 		t.Fatalf("cycle : %v", err)
 	}
@@ -268,6 +274,9 @@ func TestParcoursBUnEspaceNouveauSePropose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows ne supprime pas un fichier ouvert : sans ce relâchement, le
+	// nettoyage de t.TempDir() échoue sur .vecu/lock. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = e.Close() })
 	// L'amorçage : ce poste n'a rien, on lui accorde « shared », il descend.
 	if err := database.SetPermission(membreID, "shared", perms.Ecriture); err != nil {
 		t.Fatal(err)
@@ -316,6 +325,9 @@ func TestParcoursBUnEspaceNouveauSePropose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows ne supprime pas un fichier ouvert : sans ce relâchement, le
+	// nettoyage de t.TempDir() échoue sur .vecu/lock. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = e2.Close() })
 	if err := e2.SyncOnce(); err != nil {
 		t.Fatal(err)
 	}
@@ -340,6 +352,9 @@ func TestParcoursBLeRefusEstDurable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows ne supprime pas un fichier ouvert : sans ce relâchement, le
+	// nettoyage de t.TempDir() échoue sur .vecu/lock. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = e.Close() })
 	if err := database.SetPermission(membreID, "shared", perms.Ecriture); err != nil {
 		t.Fatal(err)
 	}
@@ -366,6 +381,9 @@ func TestParcoursBLeRefusEstDurable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows ne supprime pas un fichier ouvert : sans ce relâchement, le
+	// nettoyage de t.TempDir() échoue sur .vecu/lock. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = e2.Close() })
 	if err := e2.SyncOnce(); err != nil {
 		t.Fatal(err)
 	}
@@ -434,6 +452,9 @@ func TestLeVecuignoreDUnEspaceEstLu(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows ne supprime pas un fichier ouvert : sans ce relâchement, le
+	// nettoyage de t.TempDir() échoue sur .vecu/lock. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = e.Close() })
 
 	// MOITIÉ 1 : l'annonce, avant que l'espace n'existe.
 	analyse := e.PreAnalyse(ailleurs)
@@ -463,6 +484,9 @@ func TestLeVecuignoreDUnEspaceEstLu(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows ne supprime pas un fichier ouvert : sans ce relâchement, le
+	// nettoyage de t.TempDir() échoue sur .vecu/lock. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = e2.Close() })
 	if err := e2.SyncOnce(); err != nil {
 		t.Fatal(err)
 	}

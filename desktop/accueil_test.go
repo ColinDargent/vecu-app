@@ -9,8 +9,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
+
+	vecusync "github.com/colindargent/vecu/client/sync"
 )
 
 // maisonJetable isole HOME : `racineAppConfig` et `cheminPlist` passent tous les
@@ -20,6 +23,14 @@ func maisonJetable(t *testing.T) string {
 	t.Helper()
 	maison := t.TempDir()
 	t.Setenv("HOME", maison)
+	// os.UserHomeDir lit %USERPROFILE% sur Windows et non HOME : sans cette
+	// ligne, le test lisait le VRAI dossier personnel. Mesuré en CI le 06/09.
+	t.Setenv("USERPROFILE", maison)
+	// Sur Windows, os.UserConfigDir lit %AppData% et non HOME : sans ces deux
+	// lignes, les tests écrivaient dans le VRAI profil de l'utilisateur et se
+	// contaminaient entre eux. Mesuré en CI le 06/09.
+	t.Setenv("AppData", filepath.Join(maison, "AppData", "Roaming"))
+	t.Setenv("LocalAppData", filepath.Join(maison, "AppData", "Local"))
 	t.Setenv("VECU_DIR", "")
 	return maison
 }
@@ -45,8 +56,12 @@ func TestPremierLancement_LesTroisSources(t *testing.T) {
 	})
 
 	t.Run("app.json présent : poste installé", func(t *testing.T) {
-		maison := maisonJetable(t)
-		p := filepath.Join(maison, "Library", "Application Support", "Vecu")
+		maisonJetable(t)
+		// Chemin DÉRIVÉ du produit : « ~/Library/Application Support/Vecu » sur
+		// macOS, « %AppData%\Vecu » sur Windows. Écrit en dur, ce test posait
+		// app.json là où le produit ne le cherche pas sur Windows, et concluait
+		// donc à un premier lancement sur un poste installé.
+		p := vecusync.DossierApplication()
 		if err := os.MkdirAll(p, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -59,6 +74,12 @@ func TestPremierLancement_LesTroisSources(t *testing.T) {
 	})
 
 	t.Run("plist seul, sans app.json : le poste venu de l'ancien daemon", func(t *testing.T) {
+		// Un plist launchd : il n'y en a pas sur Windows, où la racine déclarée se
+		// lit dans le magasin du Planificateur de tâches. Le pendant Windows de
+		// cette lecture est couvert par service_windows_test.go.
+		if runtime.GOOS == "windows" {
+			t.Skip("plist launchd : concept macOS")
+		}
 		maison := maisonJetable(t)
 		agents := filepath.Join(maison, "Library", "LaunchAgents")
 		if err := os.MkdirAll(agents, 0o755); err != nil {

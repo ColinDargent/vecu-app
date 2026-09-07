@@ -13,6 +13,7 @@ import (
 	"github.com/colindargent/vecu/server/db"
 	"github.com/colindargent/vecu/server/espaces"
 	"github.com/colindargent/vecu/server/perms"
+	"github.com/colindargent/vecu/server/skills"
 )
 
 // accesVM : le droit d'un utilisateur à la racine d'un objet (un skill), tel
@@ -39,12 +40,33 @@ type espaceAccesVM struct {
 
 // reglesInternes : les règles posées strictement à l'intérieur de l'objet.
 // Ce sont elles qui peuvent rendre inopérant un clic sur la racine.
+//
+// LA ZONE DES SKILLS EN EST EXCLUE, et c'est ce qui rend l'avertissement
+// lisible (02/09, retour de Colin). `CreateUser` pose `shared/skills = privé`
+// sur CHAQUE compte, plus une règle par skill : sur `shared`, cette fonction
+// rendait donc trente-cinq lignes identiques d'un compte à l'autre, affichées
+// en rouge sous les boutons. L'avertissement disparaissait dans son propre
+// bruit, et le bruit disait « alerte » là où il n'y a qu'un défaut du système.
+//
+// Ces règles-là ne peuvent pas non plus rendre un clic inopérant au sens visé :
+// les skills ont leur propre écran, et leur propre section sur cette page. Le
+// bouton d'un espace ne prétend rien sur eux.
 func reglesInternes(nom string, rules []perms.Rule) []string {
+	dansZoneSkills := skills.SousRacine(nom) || perms.Canon(nom) == skills.DefaultRoot
 	var out []string
 	for _, ru := range rules {
-		if canon := perms.Canon(ru.Path); strings.HasPrefix(canon, nom+"/") {
-			out = append(out, canon+" = "+niveauFR(ru.Level))
+		canon := perms.Canon(ru.Path)
+		if !strings.HasPrefix(canon, nom+"/") {
+			continue
 		}
+		// L'exclusion ne vaut QUE quand l'objet affiché est hors de la zone des
+		// skills. Sur le panneau d'un skill, une règle posée à l'intérieur de ce
+		// skill est exactement l'avertissement qu'on veut : elle rend bien le
+		// bouton de sa racine inopérant.
+		if !dansZoneSkills && (skills.SousRacine(canon) || canon == skills.DefaultRoot) {
+			continue
+		}
+		out = append(out, canon+" = "+niveauFR(ru.Level))
 	}
 	sort.Strings(out)
 	return out
@@ -63,6 +85,11 @@ func (s *Server) espacesDuDepot(u *db.User) ([]espaces.Info, error) {
 	files, err := s.Store.List("")
 	if err != nil {
 		return nil, err
+	}
+	// Meme vue que l'accueil et l'ecran des dossiers : un administrateur voit
+	// les espaces qu'il s'est fermes, annotes de leur niveau reel (DAR-196).
+	if u.IsAdmin {
+		return espaces.ListAdmin(files, u.DefaultLevel, rules), nil
 	}
 	return espaces.List(files, u.DefaultLevel, rules), nil
 }

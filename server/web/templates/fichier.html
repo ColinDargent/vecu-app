@@ -1,5 +1,110 @@
 {{define "title"}}{{.Chemin}}{{end}}
 {{define "content"}}
-<p><a href="/admin/">Dossiers</a>{{range .Fil}} / <a href="{{.Href}}">{{.Nom}}</a> {{end}}· <a href="{{.HrefHistorique}}">Historique</a></p>
+<style>
+  /* Une note lue, pas un site : la colonne reste étroite, les rythmes
+     verticaux sont ceux d'un traitement de texte. Le reste hérite du layout. */
+  .rendu { max-width: 44rem; line-height: 1.6; }
+  /* LE GABARIT GLOBAL REECRIT LE TEXTE DE LA NOTE. Sa regle `h2` impose
+     `text-transform: uppercase` et une encre douce - un titre ecrit
+     « Décisions » dans le fichier s'affiche « DÉCISIONS ». Sur l'ecran dont
+     le contrat est de montrer la note telle qu'elle est, c'est un mensonge.
+     Tout ce qui reecrit du TEXTE se neutralise donc explicitement ici, et pas
+     seulement ce qui se voyait sur la premiere note d'essai. */
+  .rendu h1, .rendu h2, .rendu h3, .rendu h4, .rendu h5, .rendu h6 {
+    line-height: 1.25; margin: 1.6rem 0 .6rem; font-weight: 700;
+    text-transform: none; letter-spacing: normal; color: var(--encre);
+  }
+  .rendu h1 { font-size: 22px; }
+  .rendu h2 { font-size: 18px; }
+  .rendu h3 { font-size: 15px; }
+  .rendu h4, .rendu h5, .rendu h6 { font-size: 13.5px; }
+  .rendu p, .rendu ul, .rendu ol, .rendu blockquote { margin: .6rem 0; }
+  .rendu li { margin: .2rem 0; }
+  .rendu code { font-family: var(--mono); font-size: 12.5px;
+                background: var(--creux); padding: .05rem .25rem; border: 1px solid var(--trait-fin); }
+  .rendu pre { background: var(--creux); border: 1px solid var(--trait);
+               padding: .6rem .7rem; overflow-x: auto; }
+  .rendu pre code { background: none; border: 0; padding: 0; }
+  .rendu blockquote { border-left: 3px solid var(--trait); padding-left: .8rem;
+                      color: var(--encre-douce); }
+  /* LE GABARIT GLOBAL REECRIT LE TEXTE DE LA NOTE, et c'est un mensonge sur
+     l'ecran dont le contrat est de la montrer telle qu'elle est : la regle `th`
+     du layout impose `text-transform: uppercase`, 11px et une encre douce,
+     donc un en-tete ecrit « colonne » s'affiche « COLONNE ». Meme famille que
+     les deux bugs du 02/09 (icones geantes, regles internes depliees) : un
+     style local qui suppose que le global ne l'atteint pas. */
+  .rendu table { border-collapse: collapse; margin: .8rem 0; width: auto; }
+  .rendu th, .rendu td { border: 1px solid var(--trait); padding: .25rem .5rem;
+                         text-align: left; font-size: 13px; text-transform: none;
+                         letter-spacing: normal; color: var(--encre); }
+  .rendu th { background: var(--surface-2); font-weight: 700; }
+  .rendu tr:last-child td { border-bottom: 1px solid var(--trait); }
+  .rendu .entete, .entete { font-family: var(--mono); font-size: 12px;
+                            background: var(--creux); border: 1px solid var(--trait-fin);
+                            padding: .4rem .6rem; color: var(--encre-douce);
+                            white-space: pre-wrap; margin: .6rem 0; }
+  .rendu img { max-width: 100%; }
+</style>
+<p><a href="/admin/">Dossiers</a>{{range .Fil}} / <a href="{{.Href}}">{{.Nom}}</a> {{end}}· <a href="{{.HrefHistorique}}">Historique</a>{{if .Createur}} · <span class="discret">créé par <b>{{.Createur}}</b></span>{{end}}</p>
+{{if .Markdown}}
+<p class="discret">{{if .Source}}Source brut. <a href="{{.HrefRendu}}">Revenir à la mise en
+forme</a>.{{else}}<a href="{{.HrefSource}}">Voir le source</a> — le texte exact du fichier, tel
+qu'il est sur le disque de chaque poste.{{end}}</p>
+{{end}}
+
+{{/* CE QUI A ETE RETIRE SE DIT. Le HTML brut d'une note n'est pas rendu (et
+     c'est la garantie de sécurité de cet écran), mais goldmark le remplace par
+     un COMMENTAIRE, donc par rien de visible : un <br> fusionne deux lignes,
+     un <mark> disparaît, et la note se lit differemment de ce qu'elle dit.
+     Sur l'écran dont le métier est de lire un fichier fidèlement, retirer un
+     morceau en silence est le pire des deux maux. */}}
+{{if .HTMLOmis}}
+<p class="discret">Cette note contient du HTML, qui n'est pas affiché ici (il ne doit pas
+s'exécuter dans une page où l'on gère des droits). <a href="{{.HrefSource}}">Le source</a> le montre.</p>
+{{end}}
+
+{{/* Le frontmatter est SORTI du markdown, sinon ses deux « --- » se lisent
+     comme une barre horizontale puis un soulignement de titre : les
+     métadonnées sortiraient en gros titre, au-dessus du vrai. Sorti ne veut pas
+     dire caché - un écran de lecture qui escamote une partie du fichier ment
+     aussi sûrement qu'un écran qui le déforme. */}}
+{{if .Entete}}
+<pre class="entete">{{.Entete}}</pre>
+{{end}}
+
+{{/* LE RENDU EST INSERE SANS ECHAPPEMENT (`template.HTML`), donc toute la
+     sûreté de cette ligne tient à goldmark, qui n'a PAS reçu `WithUnsafe` :
+     le HTML brut d'une note devient « raw HTML omitted », et une URL
+     `javascript:` devient un href vide. Un `<script>` déposé dans une note
+     s'exécuterait sinon dans la session d'un administrateur. Voir
+     markdown.go, et le test qui le fige. */}}
+{{if .Source}}
 <pre class="contenu">{{.Contenu}}</pre>
+{{else}}
+<article class="rendu">{{.Rendu}}</article>
+{{end}}
+
+{{if .Supprimable}}
+{{/* LA TROISIÈME PORTE DE DAR-204. Elle est en bas, après le contenu, et pas
+     dans l'en-tête : on la trouve quand on la cherche, on ne tombe pas dessus
+     en lisant.
+
+     La phrase dit ce que le geste fait VRAIMENT. « Supprimer » sur un fichier
+     synchronisé n'est pas un geste local : le fichier part de tous les postes
+     au cycle suivant. C'est le seul bouton de l'interface dont l'effet dépasse
+     l'écran où on le déclenche. */}}
+<details class="reglage">
+  <summary>Supprimer ce fichier</summary>
+  <p class="discret">Le fichier part du dépôt, donc <strong>de tous les postes</strong> au cycle
+  suivant. L'historique le garde : il reste récupérable depuis
+  <a href="{{.HrefHistorique}}">ses versions</a>.</p>
+  <form method="post" action="/admin/fichier/supprimer"
+        onsubmit="return confirm('Supprimer {{.Nom}} pour tout le monde ?')">
+    <input type="hidden" name="chemin" value="{{.Chemin}}">
+    <input name="confirmation" placeholder="{{.Nom}}" size="24" required
+           aria-label="Retaper le nom du fichier pour confirmer">
+    <button>Supprimer</button>
+  </form>
+</details>
+{{end}}
 {{end}}

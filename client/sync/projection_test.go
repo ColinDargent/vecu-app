@@ -15,7 +15,9 @@ func lienVers(t *testing.T, dir, slug string) string {
 	if err != nil {
 		return ""
 	}
-	return dest
+	// Windows réécrit la cible d'un lien en antislashs à la création : on compare
+	// des chemins, pas des octets. Même normalisation que `memeCible`.
+	return filepath.ToSlash(dest)
 }
 
 // poseLien crée un lien symbolique `.claude/skills/<slug>` -> cible (brut).
@@ -214,8 +216,11 @@ func TestSkillsMontes(t *testing.T) {
 // $HOME et $PATH sont neutralisés pour que seul le `.claude/` de la racine
 // compte (la machine de test a un vrai ~/.claude et parfois `claude` sur le PATH).
 func TestDetecteClaude(t *testing.T) {
-	t.Setenv("HOME", t.TempDir()) // home sans .claude
-	t.Setenv("PATH", "")          // pas de `claude` trouvable
+	t.Setenv("HOME", t.TempDir())
+	// os.UserHomeDir lit %USERPROFILE% sur Windows et non HOME : sans cette
+	// ligne, le test lisait le VRAI dossier personnel. Mesuré en CI le 06/09.
+	t.Setenv("USERPROFILE", t.TempDir()) // home sans .claude
+	t.Setenv("PATH", "")                 // pas de `claude` trouvable
 
 	dir := t.TempDir()
 	if detecteClaude(dir) {
@@ -235,6 +240,9 @@ func TestDetecteClaude(t *testing.T) {
 // finir avec la projection active ET persistée, sans aucune commande.
 func TestNewEngineActiveProjection(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	// os.UserHomeDir lit %USERPROFILE% sur Windows et non HOME : sans cette
+	// ligne, le test lisait le VRAI dossier personnel. Mesuré en CI le 06/09.
+	t.Setenv("USERPROFILE", t.TempDir())
 	t.Setenv("PATH", "")
 
 	dir := t.TempDir()
@@ -249,6 +257,9 @@ func TestNewEngineActiveProjection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows ne supprime pas un fichier ouvert : sans ce relâchement, le
+	// nettoyage de t.TempDir() échoue sur .vecu/lock. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = e.Close() })
 	defer e.Close()
 
 	if !slices.Equal(e.projections, []string{"claude"}) {
@@ -268,6 +279,9 @@ func TestNewEngineActiveProjection(t *testing.T) {
 // éteinte (on n'impose rien à un poste qui n'utilise pas Claude).
 func TestNewEngineSansClaudeNeProjettePas(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	// os.UserHomeDir lit %USERPROFILE% sur Windows et non HOME : sans cette
+	// ligne, le test lisait le VRAI dossier personnel. Mesuré en CI le 06/09.
+	t.Setenv("USERPROFILE", t.TempDir())
 	t.Setenv("PATH", "")
 
 	dir := t.TempDir()
@@ -278,6 +292,9 @@ func TestNewEngineSansClaudeNeProjettePas(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows ne supprime pas un fichier ouvert : sans ce relâchement, le
+	// nettoyage de t.TempDir() échoue sur .vecu/lock. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = e.Close() })
 	defer e.Close()
 
 	if len(e.projections) != 0 {
@@ -345,7 +362,9 @@ func TestAgentsProjeteSiDossierPresent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lien absent : %v", err)
 	}
-	if dest != "../../shared/skills/dev-scope" {
+	// Comparaison NORMALISÉE : Windows réécrit la cible d'un lien en antislashs à
+	// la création, comme dans `lienVers` et `memeCible`.
+	if filepath.ToSlash(dest) != "../../shared/skills/dev-scope" {
 		t.Errorf("cible du lien = %q", dest)
 	}
 }
@@ -623,6 +642,9 @@ func TestDetectionNeReactivePasUnChoixRetire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows ne supprime pas un fichier ouvert : sans ce relâchement, le
+	// nettoyage de t.TempDir() échoue sur .vecu/lock. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = e.Close() })
 	e.Close()
 	cfg, err := LoadConfig(dir)
 	if err != nil {
@@ -643,6 +665,9 @@ func TestDetectionNeReactivePasUnChoixRetire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows ne supprime pas un fichier ouvert : sans ce relâchement, le
+	// nettoyage de t.TempDir() échoue sur .vecu/lock. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = e2.Close() })
 	e2.Close()
 	cfg2, err := LoadConfig(dir)
 	if err != nil {
@@ -668,6 +693,9 @@ func TestDetectionMigreUnPosteDejaConfigure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows ne supprime pas un fichier ouvert : sans ce relâchement, le
+	// nettoyage de t.TempDir() échoue sur .vecu/lock. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = e.Close() })
 	e.Close()
 	cfg, err := LoadConfig(dir)
 	if err != nil {

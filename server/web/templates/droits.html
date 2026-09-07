@@ -31,7 +31,17 @@
       </form>
       {{end}}
       {{if $acces.Profondes}}
-      <div class="erreur">Règles internes qui l'emportent : {{range $acces.Profondes}}<code>{{.}}</code> {{end}}</div>
+      {{/* REPLIÉ, comme sur l'écran des dossiers. Déroulé et en rouge plein,
+           l'avertissement faisait un mur sous les boutons qu'il commente - et
+           un mur rouge se lit comme une panne, pas comme une remarque. */}}
+      <details class="internes">
+        <summary>{{len $acces.Profondes}} règle{{if gt (len $acces.Profondes) 1}}s{{end}} posée{{if gt (len $acces.Profondes) 1}}s{{end}}
+        plus bas l'emporte{{if gt (len $acces.Profondes) 1}}nt{{end}} sur ces boutons</summary>
+        <ul class="liste-internes">
+          {{range $acces.Profondes}}<li><code>{{.}}</code></li>{{end}}
+        </ul>
+        <p>Tant qu'elles sont là, changer l'accès ici peut ne rien changer.</p>
+      </details>
       {{end}}
     </td>
   </tr>
@@ -63,7 +73,17 @@
       <span class="discret">{{$acces.Niveau}} - géré par son créateur</span>
       {{end}}
       {{if $acces.Profondes}}
-      <div class="erreur">Règles internes qui l'emportent : {{range $acces.Profondes}}<code>{{.}}</code> {{end}}</div>
+      {{/* REPLIÉ, comme sur l'écran des dossiers. Déroulé et en rouge plein,
+           l'avertissement faisait un mur sous les boutons qu'il commente - et
+           un mur rouge se lit comme une panne, pas comme une remarque. */}}
+      <details class="internes">
+        <summary>{{len $acces.Profondes}} règle{{if gt (len $acces.Profondes) 1}}s{{end}} posée{{if gt (len $acces.Profondes) 1}}s{{end}}
+        plus bas l'emporte{{if gt (len $acces.Profondes) 1}}nt{{end}} sur ces boutons</summary>
+        <ul class="liste-internes">
+          {{range $acces.Profondes}}<li><code>{{.}}</code></li>{{end}}
+        </ul>
+        <p>Tant qu'elles sont là, changer l'accès ici peut ne rien changer.</p>
+      </details>
       {{end}}
     </td>
   </tr>
@@ -99,11 +119,16 @@
 <h2>Arborescence (droit effectif)</h2>
 {{if .Arbre}}
 <table>
-  <tr><th>Dossier</th><th>Droit effectif</th></tr>
+  <tr><th>Dossier</th><th>Droit effectif</th><th>D'où il vient</th></tr>
   {{range .Arbre}}
   <tr>
     <td style="padding-left: {{.Profondeur}}.5rem">{{.Nom}}/{{if .Direct}} <span class="discret">(règle directe)</span>{{end}}</td>
     <td>{{.Niveau}}</td>
+    {{/* D'OÙ vient ce droit. Sans cette colonne, on lit « lecture » et on ne
+         sait pas s'il faut toucher ce compte, sa cohorte ou le dossier - donc
+         on pose une exception qui double une cohorte, et le réglage par groupe
+         se vide de son sens un compte à la fois. */}}
+    <td class="discret">{{.Origine}}</td>
   </tr>
   {{end}}
 </table>

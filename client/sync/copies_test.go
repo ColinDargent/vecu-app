@@ -28,6 +28,9 @@ func moteurBavard(t *testing.T, url, token string) (*Engine, string, *[]string) 
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Windows ne supprime pas un fichier ouvert : sans ce relâchement, le
+	// nettoyage de t.TempDir() échoue sur .vecu/lock. Mesuré en CI le 06/09.
+	t.Cleanup(func() { _ = e.Close() })
 	e.Importer([]string{"equipe"})
 	return e, dir, &lignes
 }
@@ -311,7 +314,7 @@ func TestCopieLocaleHeriteeDuServeurNeDeclencheAucuneSuppression(t *testing.T) {
 
 	// Posée directement par l'API : elle date d'avant la règle d'ignore.
 	const heritee = "equipe/note (conflit local).md"
-	if _, err := e.client.Put(heritee, "contenu hérité\n", ""); err != nil {
+	if _, err := e.client.Put(heritee, "contenu hérité\n", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	writeFile(t, dir, heritee, "contenu hérité\n")

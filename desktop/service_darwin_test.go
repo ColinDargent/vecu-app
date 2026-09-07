@@ -9,11 +9,11 @@ import (
 
 func TestContenuPlist(t *testing.T) {
 	c := serviceCfg{
-		label:   "fr.vecu.sync",
-		binaire: "/Users/x/Applications/Vécu.app/Contents/MacOS/vecu-app",
-		racine:  "/Users/x/second-brain",
-		plist:   "/ignoré",
-		journal: "/Users/x/Library/Logs/vecu-app.log",
+		label:      "fr.vecu.sync",
+		binaire:    "/Users/x/Applications/Vécu.app/Contents/MacOS/vecu-app",
+		racine:     "/Users/x/second-brain",
+		definition: "/ignoré",
+		journal:    "/Users/x/Library/Logs/vecu-app.log",
 	}
 	p := c.contenuPlist()
 
@@ -62,15 +62,15 @@ func TestRacineDepuisPlist(t *testing.T) {
 	if err := os.WriteFile(p, []byte(contenu), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	racine, ok := racineDepuisPlist(p)
+	racine, ok := racineDeclaree(p)
 	if !ok || racine != "/Users/x/second-brain" {
-		t.Errorf("racineDepuisPlist = %q, %v ; veut /Users/x/second-brain, true", racine, ok)
+		t.Errorf("racineDeclaree = %q, %v ; veut /Users/x/second-brain, true", racine, ok)
 	}
 
 	// Un plist sans --dir (l'app migrée) : pas de racine à apprendre.
 	p2 := filepath.Join(dir, "app.plist")
 	os.WriteFile(p2, []byte(`<?xml version="1.0"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>ProgramArguments</key><array><string>/x/vecu-app</string></array></dict></plist>`), 0o644)
-	if _, ok := racineDepuisPlist(p2); ok {
+	if _, ok := racineDeclaree(p2); ok {
 		t.Errorf("un plist sans --dir ne doit pas rendre de racine")
 	}
 }

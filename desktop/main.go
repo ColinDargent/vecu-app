@@ -13,20 +13,15 @@ import (
 	"io"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"fyne.io/systray"
 
 	"github.com/colindargent/vecu/client/sync"
 )
-
-//go:embed icon.png
-var iconTemplate []byte
 
 // rafraichi : cadence de mise à jour des libellés du menu depuis l'état moteur.
 const rafraichi = 3 * time.Second
@@ -98,7 +93,7 @@ func main() {
 	// (lancée par launchd, VECU_SERVICE=1) tient le moteur et ne touche jamais
 	// launchd. L'instance MANUELLE (double-clic) installe/migre le service, puis
 	// sort sans jamais lancer le moteur.
-	if os.Getenv(envService) == "1" {
+	if estInstanceService() {
 		systray.Run(onReady, onExit)
 		return
 	}
@@ -164,11 +159,11 @@ func migreEtInstalle() {
 	}
 
 	svc := serviceCfg{
-		label:   labelService,
-		binaire: bin,
-		racine:  racine,
-		plist:   cheminPlist(labelService),
-		journal: cheminJournal(),
+		label:      labelService,
+		binaire:    bin,
+		racine:     racine,
+		definition: cheminDefinition(labelService),
+		journal:    cheminJournal(),
 	}
 	installe, err := synchroniseService(svc)
 	switch {
@@ -192,26 +187,23 @@ func migreEtInstalle() {
 	}
 }
 
-// verrouMigration : flock non bloquant sur un fichier dédié. Rend une erreur si
-// un autre process le tient déjà (une migration concurrente est en cours).
+// verrouMigration : verrou exclusif non bloquant sur un fichier dédié. Rend une
+// erreur si un autre process le tient déjà (une migration concurrente est en
+// cours).
+//
+// Délègue à `sync.VerrouExclusif` depuis le port Windows. Cette fonction posait
+// son propre flock, dupliquant la mécanique du moteur - donc, sur Windows, il
+// aurait fallu écrire deux fois la même couture et se souvenir des deux.
 func verrouMigration() (*os.File, error) {
-	p := filepath.Join(filepath.Dir(cheminAppConfig()), "migration.lock")
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return nil, err
-	}
-	f, err := os.OpenFile(p, os.O_CREATE|os.O_RDWR, 0o644)
-	if err != nil {
-		return nil, err
-	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		f.Close()
-		return nil, err
-	}
-	return f, nil
+	return sync.VerrouExclusif(filepath.Join(filepath.Dir(cheminAppConfig()), "migration.lock"))
 }
 
 func onReady() {
-	systray.SetTemplateIcon(iconTemplate, iconTemplate)
+	// Deux icônes et non une, et ce n'est pas une coquetterie : sur macOS le
+	// premier argument est l'icône « template » (monochrome, teintée par le
+	// système) ; sur Windows, systray ignore le premier et charge le second.
+	// Les formats diffèrent - voir icone_darwin.go et icone_windows.go.
+	systray.SetTemplateIcon(iconTemplate, iconeSysteme)
 	systray.SetTooltip("Vécu")
 
 	racine := resoudRacine()
@@ -360,7 +352,7 @@ func onReady() {
 			case <-mRetrait.ClickedCh:
 				go a.retireDossier(logf)
 			case <-mOuvrir.ClickedCh:
-				_ = exec.Command("open", a.racine).Start()
+				_ = ouvreDossier(a.racine)
 			case <-mAdmin.ClickedCh:
 				if a.serveur != "" {
 					go a.ouvreAdmin(logf)
@@ -397,7 +389,7 @@ func (a *app) ouvreAdmin(logf func(string, ...any)) {
 			logf("ouverture de l'admin sans session (%v)", err)
 		}
 	}
-	if err := exec.Command("open", url).Start(); err != nil {
+	if err := ouvreURL(url); err != nil {
 		logf("ouverture de l'admin : %v", err)
 	}
 }
@@ -534,7 +526,7 @@ func resoudRacine() string {
 	if d := racineAppConfig(); d != "" {
 		return d
 	}
-	if d, ok := racineDepuisPlist(cheminPlist(labelService)); ok {
+	if d, ok := racineDeclaree(cheminDefinition(labelService)); ok {
 		return d
 	}
 	// Dernier recours, et il ne devrait plus jamais servir : `premierLancement`
@@ -563,7 +555,7 @@ func premierLancement() bool {
 	if racineAppConfig() != "" {
 		return false
 	}
-	if _, ok := racineDepuisPlist(cheminPlist(labelService)); ok {
+	if _, ok := racineDeclaree(cheminDefinition(labelService)); ok {
 		return false
 	}
 	return true
@@ -605,13 +597,7 @@ func cheminJournal() string { return dansLesLogs("vecu-app.log") }
 // tout ce que `logf` écrit, et lui seul est tourné par taille.
 func cheminJournalSync() string { return dansLesLogs("vecu-sync.log") }
 
-func dansLesLogs(nom string) string {
-	maison, err := os.UserHomeDir()
-	if err != nil {
-		return "/tmp/" + nom
-	}
-	return filepath.Join(maison, "Library", "Logs", nom)
-}
+func dansLesLogs(nom string) string { return filepath.Join(sync.DossierJournaux(), nom) }
 
 // ouvreJournal : le moteur logue via logf, dans SON journal, tourné par taille.
 // Repli sur stderr en cas d'échec - stderr étant vecu-app.log sous launchd,

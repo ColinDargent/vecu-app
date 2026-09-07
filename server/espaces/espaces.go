@@ -34,6 +34,11 @@ type Info struct {
 	// décider de l'appartenance : voir List.
 	Niveau perms.Level
 	// Fichiers : nombre de fichiers lisibles par cet utilisateur.
+	//
+	// SAUF par ListAdmin, qui ne filtre pas : le compte porte alors tous les
+	// fichiers de l'espace que l'appelant lui a passes, et Niveau comme Ecriture
+	// peuvent dire « invisible » sur un espace dont le compte n'est pas zero.
+	// C'est voulu - un administrateur doit voir l'espace qu'il s'est ferme.
 	Fichiers int
 	// Ecriture : au moins un chemin de l'espace est modifiable. Un espace
 	// entièrement en lecture seule doit pouvoir être annoncé comme tel, sinon
@@ -60,13 +65,32 @@ type Info struct {
 // refusé. L'écriture de tels chemins est refusée par l'API (voir ValidChemin) ;
 // le filtre reste ici en défense pour un dépôt importé hors du produit.
 func List(paths []string, defaut perms.Level, rules []perms.Rule) []Info {
+	return liste(paths, defaut, rules, true)
+}
+
+// ListAdmin liste les espaces SANS ecarter ceux que le lecteur s'est fermes,
+// en gardant l'annotation de niveau REELLE.
+//
+// Pourquoi elle existe. `List` confondait deux questions : « quels chemins
+// considerer » et « quel niveau afficher ». Pour un administrateur les deux
+// divergent - il doit voir l'espace qu'il a ferme, annote « prive », sinon il
+// ne peut plus le rouvrir depuis l'accueil et « administrable » n'est vrai que
+// pour qui connait l'URL. C'est le meme defaut que l'ecran des dossiers portait
+// (DAR-196), au meme endroit du raisonnement.
+//
+// A n'appeler que sur un lecteur administrateur : elle ne filtre rien.
+func ListAdmin(paths []string, defaut perms.Level, rules []perms.Rule) []Info {
+	return liste(paths, defaut, rules, false)
+}
+
+func liste(paths []string, defaut perms.Level, rules []perms.Rule, filtre bool) []Info {
 	byNom := map[string]*Info{}
 	for _, p := range paths {
 		nom, _, ok := strings.Cut(p, "/")
 		if !ok || ValidNom(nom) != nil {
 			continue
 		}
-		if !perms.CanRead(p, defaut, rules) {
+		if filtre && !perms.CanRead(p, defaut, rules) {
 			continue
 		}
 		info := byNom[nom]
@@ -254,4 +278,74 @@ func Create(st *storage.Store, nom, auteur string) error {
 	// traite déjà. Y mettre le nom la ferait disparaître au profit d'une copie
 	// qui dit la même chose.
 	return creeAvecLibelle(st, nom, "", auteur)
+}
+
+// Contenu rend les chemins que l'espace porte EN DEHORS de son fichier de
+// métadonnées, triés. C'est ce qu'on perdrait de vue en le supprimant.
+func Contenu(st *storage.Store, nom string) ([]string, error) {
+	paths, err := st.List("")
+	if err != nil {
+		return nil, err
+	}
+	prefixe := nom + "/"
+	meta := prefixe + FichierMeta
+	var reste []string
+	for _, p := range paths {
+		if !strings.HasPrefix(p, prefixe) || p == meta {
+			continue
+		}
+		reste = append(reste, p)
+	}
+	sort.Strings(reste)
+	return reste, nil
+}
+
+// Supprimer retire l'espace en retirant le fichier qui le fait exister.
+//
+// L'ESPACE DOIT ÊTRE VIDE, et ce refus est le cœur de la fonction plutôt qu'une
+// précaution. Un espace est un dossier de premier niveau, et son existence tient
+// à son fichier de métadonnées : retirer ce fichier alors que le dossier porte
+// encore des fichiers ne les supprime pas, il les rend ORPHELINS. Le client sait
+// déjà nommer cet état - « chemin hors espace côté serveur : aucun dossier local
+// ne peut l'accueillir » - et c'est un cul-de-sac : plus aucun poste ne peut les
+// redescendre, et aucun écran ne les montre.
+//
+// L'alternative aurait été de supprimer le contenu avec l'espace. On ne la prend
+// pas : ce serait la seule suppression de masse du produit, déclenchée par un
+// bouton d'administration, sur des fichiers que celui qui clique n'a pas
+// forcément lus. Vider d'abord est un geste explicite, et il passe par les
+// chemins de suppression qui existent déjà, avec leurs propres gardes.
+func Supprimer(st *storage.Store, nom, auteur string) error {
+	if err := ValidNom(nom); err != nil {
+		return err
+	}
+	occupation, err := Occupation(st, nom)
+	if err != nil {
+		return err
+	}
+	if occupation != Dossier {
+		return fmt.Errorf("l'espace « %s » n'existe pas", nom)
+	}
+	reste, err := Contenu(st, nom)
+	if err != nil {
+		return err
+	}
+	if len(reste) > 0 {
+		exemple := reste[0]
+		if len(reste) > 1 {
+			exemple = fmt.Sprintf("%s (et %d autre%s)", reste[0], len(reste)-1, pluriel(len(reste)-1))
+		}
+		return fmt.Errorf("l'espace « %s » porte encore %d fichier%s : videz-le d'abord, sinon ils deviendraient "+
+			"introuvables pour tous les postes. Premier restant : %s",
+			nom, len(reste), pluriel(len(reste)), exemple)
+	}
+	_, err = st.Delete(nom+"/"+FichierMeta, auteur)
+	return err
+}
+
+func pluriel(n int) string {
+	if n > 1 {
+		return "s"
+	}
+	return ""
 }

@@ -22,8 +22,12 @@ pour ça.
 
 Avant d'aller plus loin, pour que tu décides en une minute.
 
-- **macOS seulement.** Le client et l'application de bureau ne tournent que sur
-  Mac. Le serveur tourne partout où Docker tourne.
+- **macOS et Windows, pas Linux.** Le client et l'application de bureau
+  tournent sur Mac et sur Windows ; le serveur tourne partout où Docker tourne.
+  Deux réserves sur Windows : le binaire n'est **pas signé Authenticode**, donc
+  SmartScreen affiche « Windows a protégé votre ordinateur » au premier
+  lancement, et l'auto-update ne sert encore que macOS - un poste Windows
+  s'installe et se met à jour à la main.
 - **Contenu texte seulement.** Markdown, HTML, code. Les images, les PDF et tout
   autre binaire sont refusés visiblement et listés un par un, jamais corrompus,
   et ils ne circulent donc pas. Prévoir un autre canal pour eux.
@@ -39,12 +43,13 @@ Avant d'aller plus loin, pour que tu décides en une minute.
 | Pour | Ce qu'il faut |
 |---|---|
 | Le serveur | Go 1.26 et git ≥ 2.38 dans le `PATH` (le rapprochement des versions passe par `git merge-tree`) |
-| Un poste | Go 1.26, et **une chaîne de compilation C** |
+| Un poste | Go 1.26, et **une chaîne de compilation C sur Mac uniquement** |
 
 Le serveur n'a pas besoin de chaîne C : son SQLite est en Go pur. Elle n'est
-requise que côté poste, où l'application de barre de menus passe par `systray`,
-qui exige `CGO_ENABLED=1`. Sur un Mac sans Xcode, `xcode-select --install`
-suffit.
+requise que sur un poste Mac, où l'application de barre de menus passe par
+`systray`, qui appelle Cocoa et exige donc `CGO_ENABLED=1`. Sur un Mac sans
+Xcode, `xcode-select --install` suffit. Sur Windows, `systray` passe par des
+appels système : `CGO_ENABLED=0` suffit, et Go seul construit tout l'arbre.
 
 ## Faire tourner le serveur
 
@@ -94,7 +99,7 @@ docker compose up -d
 
 ## Installer un poste
 
-Trois étapes, une seule fois par Mac.
+Trois étapes, une seule fois par poste.
 
 **1. Construire et installer le client.**
 
@@ -123,9 +128,21 @@ cp -R "dist/Vécu.app" /Applications/
 open "/Applications/Vécu.app"
 ```
 
+Sur Windows, il n'y a pas de bundle à emballer : la livraison est le binaire.
+
+```bash
+make build-exe VERSION=dev
+```
+
+`dist/vecu-app.exe` se copie sur le poste Windows et se lance. Au premier
+lancement, SmartScreen affiche « Windows a protégé votre ordinateur » : passer
+par « Informations complémentaires » puis « Exécuter quand même ». Faire
+disparaître cet écran demande un certificat, pas une ligne de code.
+
 L'application embarque le moteur de synchronisation et devient le processus
-supervisé par launchd : elle se relance au démarrage de la session et survit aux
-redémarrages. C'est par elle que passe l'usage courant, une fois installée.
+supervisé par le système - launchd sur macOS, le Planificateur de tâches sur
+Windows : elle se relance au démarrage de la session et survit aux redémarrages.
+C'est par elle que passe l'usage courant, une fois installée.
 
 **Ensuite, plus aucune commande.** Les dossiers apparaissent et disparaissent
 selon ce qui se décide dans l'interface web.
@@ -140,6 +157,12 @@ Pour le relancer sans passer par le Finder :
 
 ```bash
 launchctl kickstart -k gui/$(id -u)/fr.vecu.sync
+```
+
+Sur Windows, le pendant est la tâche `fr.vecu.sync` du Planificateur :
+
+```
+schtasks /Run /TN fr.vecu.sync
 ```
 
 ## Le modèle en cinq minutes
@@ -285,7 +308,7 @@ verrou : arrêter le service avant un `vecu sync` manuel.
   - `server/perms/` : l'évaluation des droits
 - `client/` : le binaire `vecu` (commandes et moteur)
   - `client/sync/` : le moteur de synchronisation, monté aussi par l'application
-- `desktop/` : l'application de barre de menus macOS
+- `desktop/` : l'application de barre de menus, macOS et Windows
 - `Dockerfile`, `docker-compose.yml` : le serveur auto-hébergé
 
 ### Comment ce dépôt est mis à jour
